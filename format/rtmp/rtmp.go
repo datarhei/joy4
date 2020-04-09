@@ -584,7 +584,9 @@ func (self *Conn) probe() (err error) {
 			return
 		}
 		if err = self.prober.PushTag(tag, int32(self.timestamp)); err != nil {
-			return
+			if Debug {
+				fmt.Printf("error probing tag: %s\n", err.Error())
+			}
 		}
 	}
 
