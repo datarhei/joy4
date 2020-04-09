@@ -5,8 +5,8 @@ package transcode
 import (
 	"fmt"
 	"time"
-	"github.com/nareix/joy4/av"
-	"github.com/nareix/joy4/av/pktque"
+	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/av/pktque"
 )
 
 var Debug bool
@@ -108,7 +108,7 @@ func (self *tStream) audioDecodeAndEncode(inpkt av.Packet) (outpkts []av.Packet,
 }
 
 // Do the transcode.
-// 
+//
 // In audio transcoding one Packet may transcode into many Packets
 // packet time will be adjusted automatically.
 func (self *Transcoder) Do(pkt av.Packet) (out []av.Packet, err error) {

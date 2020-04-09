@@ -4,11 +4,11 @@ import (
 	"sync"
 	"io"
 	"net/http"
-	"github.com/nareix/joy4/format"
-	"github.com/nareix/joy4/av/avutil"
-	"github.com/nareix/joy4/av/pubsub"
-	"github.com/nareix/joy4/format/rtmp"
-	"github.com/nareix/joy4/format/flv"
+	"github.com/datarhei/joy4/format"
+	"github.com/datarhei/joy4/av/avutil"
+	"github.com/datarhei/joy4/av/pubsub"
+	"github.com/datarhei/joy4/format/rtmp"
+	"github.com/datarhei/joy4/format/flv"
 )
 
 func init() {
@@ -78,7 +78,7 @@ func main() {
 
 		if ch != nil {
 			w.Header().Set("Content-Type", "video/x-flv")
-			w.Header().Set("Transfer-Encoding", "chunked")		
+			w.Header().Set("Transfer-Encoding", "chunked")
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.WriteHeader(200)
 			flusher := w.(http.Flusher)

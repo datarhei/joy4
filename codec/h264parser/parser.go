@@ -2,9 +2,9 @@
 package h264parser
 
 import (
-	"github.com/nareix/joy4/av"
-	"github.com/nareix/joy4/utils/bits"
-	"github.com/nareix/joy4/utils/bits/pio"
+	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/utils/bits"
+	"github.com/datarhei/joy4/utils/bits/pio"
 	"fmt"
 	"bytes"
 )
@@ -131,7 +131,7 @@ Annex B is commonly used in live and streaming formats such as transport streams
 2. AVCC
 The other common method of storing an H.264 stream is the AVCC format. In this format, each NALU is preceded with its length (in big endian format). This method is easier to parse, but you lose the byte alignment features of Annex B. Just to complicate things, the length may be encoded using 1, 2 or 4 bytes. This value is stored in a header object. This header is often called ‘extradata’ or ‘sequence header’. Its basic format is as follows:
 
-bits    
+bits
 8   version ( always 0x01 )
 8   avc profile ( sps[0][1] )
 8   avc compatibility ( sps[0][2] )

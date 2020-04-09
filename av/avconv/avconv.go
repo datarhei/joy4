@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"io"
 	"time"
-	"github.com/nareix/joy4/av/avutil"
-	"github.com/nareix/joy4/av"
-	"github.com/nareix/joy4/av/pktque"
-	"github.com/nareix/joy4/av/transcode"
+	"github.com/datarhei/joy4/av/avutil"
+	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/av/pktque"
+	"github.com/datarhei/joy4/av/transcode"
 )
 
 var Debug bool

@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/nareix/joy4/av"
-	"github.com/nareix/joy4/av/avutil"
-	"github.com/nareix/joy4/format"
+	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/av/avutil"
+	"github.com/datarhei/joy4/format"
 )
 
 func init() {

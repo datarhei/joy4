@@ -8,13 +8,13 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"github.com/nareix/joy4/utils/bits/pio"
-	"github.com/nareix/joy4/av"
-	"github.com/nareix/joy4/av/avutil"
-	"github.com/nareix/joy4/codec"
-	"github.com/nareix/joy4/codec/aacparser"
-	"github.com/nareix/joy4/codec/h264parser"
-	"github.com/nareix/joy4/format/rtsp/sdp"
+	"github.com/datarhei/joy4/utils/bits/pio"
+	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/av/avutil"
+	"github.com/datarhei/joy4/codec"
+	"github.com/datarhei/joy4/codec/aacparser"
+	"github.com/datarhei/joy4/codec/h264parser"
+	"github.com/datarhei/joy4/format/rtsp/sdp"
 	"io"
 	"net"
 	"net/textproto"
@@ -1161,7 +1161,7 @@ func (self *Client) handleBlock(block []byte) (pkt av.Packet, ok bool, err error
 		TODO: sync AV by rtcp NTP timestamp
 		TODO: handle timestamp overflow
 		https://tools.ietf.org/html/rfc3550
-		A receiver can then synchronize presentation of the audio and video packets by relating 
+		A receiver can then synchronize presentation of the audio and video packets by relating
 		their RTP timestamps using the timestamp pairs in RTCP SR packets.
 		*/
 		if stream.firsttimestamp == 0 {

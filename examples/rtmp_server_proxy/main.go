@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 	"strings"
-	"github.com/nareix/joy4/format"
-	"github.com/nareix/joy4/av/avutil"
-	"github.com/nareix/joy4/format/rtmp"
+	"github.com/datarhei/joy4/format"
+	"github.com/datarhei/joy4/av/avutil"
+	"github.com/datarhei/joy4/format/rtmp"
 )
 
 func init() {
