@@ -1,6 +1,6 @@
 # JOY4
 
-> Golang audio/video library and streaming server
+Golang audio/video library and streaming server
 
 JOY4 is powerful library written in golang, well-designed interface makes a few lines of code can do a lot of things such as reading, writing, transcoding among variety media formats, or setting up high-performance live streaming server.
 
@@ -48,11 +48,6 @@ Packet filters ([doc](https://godoc.org/github.com/nareix/joy4/av/pktque))
 - Make A/V sync
 - Customize ([example](https://github.com/nareix/joy4/blob/master/examples/rtmp_server_channels/main.go#L19))
 
-FFMPEG Golang-style binding ([doc](https://godoc.org/github.com/nareix/joy4/cgo/ffmpeg))
-- Audio Encoder / Decoder
-- Video Decoder
-- Audio Resampler
-
 Support codec and container parsers:
 
 - H264 SPS/PPS/AVCDecoderConfigure parser ([doc](https://godoc.org/github.com/nareix/joy4/codec/h264parser))
@@ -64,13 +59,11 @@ Support codec and container parsers:
 
 Go version >= 1.6
 
-ffmpeg version >= 3.0 (optional)
-
 # TODO
 
-HLS / MPEG-DASH Server
+RTMPS
 
-ffmpeg.VideoEncoder / ffmpeg.SWScale
+HLS / MPEG-DASH Server
 
 # License
 
