@@ -88,7 +88,7 @@ func (self *Prober) PushTag(tag flvio.Tag, timestamp int32) (err error) {
 			if !self.GotVideo {
 				var stream h264parser.CodecData
 				if stream, err = h264parser.NewCodecDataFromAVCDecoderConfRecord(tag.Data); err != nil {
-					err = fmt.Errorf("flv: h264 seqhdr invalid")
+					err = fmt.Errorf("flv: h264 seqhdr invalid: %s", err.Error())
 					return
 				}
 				self.VideoStreamIdx = len(self.Streams)

@@ -61,6 +61,11 @@ const (
 )
 
 type Tag struct {
+	/*
+		8 = Audio
+		9 = Video
+		18 = Script data
+	*/
 	Type uint8
 
 	/*
