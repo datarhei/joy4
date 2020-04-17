@@ -179,6 +179,8 @@ type Conn struct {
 	datamsgvals []interface{}
 	avtag       flvio.Tag
 
+	metadata flvio.AMFMap
+
 	eventtype uint16
 }
 
@@ -515,11 +517,11 @@ func (self *Conn) readConnect() (err error) {
 				}
 
 				// > |RtmpSampleAccess()
-				if err = self.writeDataMsg(5, self.avmsgsid,
-					"|RtmpSampleAccess", true, true,
-				); err != nil {
-					return
-				}
+				//if err = self.writeDataMsg(5, self.avmsgsid,
+				//	"|RtmpSampleAccess", true, true,
+				//); err != nil {
+				//	return
+				//}
 
 				if err = self.flushWrite(); err != nil {
 					return
@@ -880,14 +882,27 @@ func (self *Conn) WriteTrailer() (err error) {
 	return
 }
 
+func (self *Conn) SetMetaData(data flvio.AMFMap) {
+	self.metadata = data
+}
+
+func (self *Conn) GetMetaData() flvio.AMFMap {
+	return self.metadata
+}
+
 func (self *Conn) WriteHeader(streams []av.CodecData) (err error) {
 	if err = self.prepare(stageCommandDone, prepareWriting); err != nil {
 		return
 	}
 
-	var metadata flvio.AMFMap
-	if metadata, err = flv.NewMetadataByStreams(streams); err != nil {
-		return
+	var metadata flvio.AMFMap = nil
+
+	metadata = self.GetMetaData()
+
+	if metadata == nil {
+		if metadata, err = flv.NewMetadataByStreams(streams); err != nil {
+			return
+		}
 	}
 
 	// > onMetaData()
@@ -1403,6 +1418,23 @@ func (self *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 		if n < len(b) {
 			err = fmt.Errorf("rtmp: DataMsgAMF0 left bytes=%d", len(b)-n)
 			return
+		}
+
+		// store metadata
+
+		metaindex := -1
+
+		for i, x := range self.datamsgvals {
+			switch x.(type) {
+			case string:
+				if x.(string) == "onMetaData" {
+					metaindex = i+1
+				}
+			}
+		}
+
+		if metaindex != -1 && metaindex < len(self.datamsgvals) {
+			self.metadata = self.datamsgvals[metaindex].(flvio.AMFMap)
 		}
 
 	case msgtypeidVideoMsg:
