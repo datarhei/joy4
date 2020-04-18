@@ -163,12 +163,14 @@ func (s *server) handlePublish(conn *rtmp.Conn) {
 		return
 	}
 
+	metadata := conn.GetMetaData()
+
 	s.lock.Lock()
 
 	ch := s.channels[conn.URL.Path]
 	if ch == nil {
 		ch = &channel{}
-		ch.metadata = conn.GetMetaData()
+		ch.metadata = metadata
 		ch.que = pubsub.NewQueue()
 		ch.que.WriteHeader(streams)
 		for _, stream := range streams {
