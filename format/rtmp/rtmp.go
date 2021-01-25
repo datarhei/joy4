@@ -119,23 +119,27 @@ func (self *Server) ListenAndServeTLS(certFile, keyFile string) error {
 }
 
 func (self *Server) ServeTLS(listener net.Listener, certFile, keyFile string) error {
-	if self.TLSConfig == nil {
-		config := &tls.Config{
-			Certificates: make([]tls.Certificate, 1),
-		}
+	var config *tls.Config
+
+	if self.TLSConfig != nil {
+		config = self.TLSConfig.Clone()
+	} else {
+		config = &tls.Config{}
+	}
+
+	configHasCert := len(config.Certificates) > 0 || config.GetCertificate != nil
+
+	if !configHasCert || certFile != "" || keyFile != "" {
+		config.Certificates = make([]tls.Certificate, 1)
 
 		var err error
 		config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
 			return fmt.Errorf("rtmp: %w", err)
 		}
-
-		self.TLSConfig = config
-	} else {
-		self.TLSConfig = self.TLSConfig.Clone()
 	}
 
-	listener = tls.NewListener(listener, self.TLSConfig)
+	listener = tls.NewListener(listener, config)
 
 	return self.Serve(listener)
 }
