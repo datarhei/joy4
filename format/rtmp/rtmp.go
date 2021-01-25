@@ -130,8 +130,12 @@ func (self *Server) ServeTLS(listener net.Listener, certFile, keyFile string) er
 			return fmt.Errorf("rtmp: %w", err)
 		}
 
-		listener = tls.NewListener(listener, config)
+		self.TLSConfig = config
+	} else {
+		self.TLSConfig = self.TLSConfig.Clone()
 	}
+
+	listener = tls.NewListener(listener, self.TLSConfig)
 
 	return self.Serve(listener)
 }
