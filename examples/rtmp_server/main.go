@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"flag"
 	"net"
 	"strings"
 	"sync"
@@ -32,7 +33,8 @@ type Config struct {
 }
 
 type Server interface {
-	ListenAndServe()
+	ListenAndServe() error
+	ListenAndServeTLS(certFile, keyFile string) error
 	Channels() []string
 }
 
@@ -72,8 +74,12 @@ func New(config Config) (Server, error) {
 	return s, nil
 }
 
-func (s *server) ListenAndServe() {
-	s.server.ListenAndServe()
+func (s *server) ListenAndServe() error {
+	return s.server.ListenAndServe()
+}
+
+func (s *server) ListenAndServeTLS(certFile, keyFile string) error {
+	return s.server.ListenAndServeTLS(certFile, keyFile)
 }
 
 func (s *server) Channels() []string {
@@ -217,9 +223,31 @@ func (s *server) handlePublish(conn *rtmp.Conn) {
 }
 
 func main() {
-	server, _ := New(Config{
-		Addr: ":1935",
-	})
+	var cert string
+	var key string
+	var help bool
 
-	server.ListenAndServe()
+	flag.StringVar(&cert, "cert", "", "Path to the certifacate file")
+	flag.StringVar(&key, "key", "", "Path to the key file")
+	flag.BoolVar(&help, "h", false, "Show options")
+
+	flag.Parse()
+
+	config := Config{
+		Addr: ":1935",
+	}
+
+	server, _ := New(config)
+
+	var err error
+
+	if len(cert) == 0 && len(key) == 0 {
+		fmt.Printf("Started RTMP server. Listening on %s\n", config.Addr)
+		err = server.ListenAndServe()
+	} else {
+		fmt.Printf("Started RTMPS server. Listening on %s\n", config.Addr)
+		err = server.ListenAndServeTLS(cert, key)
+	}
+
+	fmt.Printf("%s\n", err)
 }

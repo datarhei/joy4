@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -58,11 +59,12 @@ var ErrServerClosed = errors.New("rtmp: Server closed")
 
 type Server struct {
 	Addr          string
+	TLSConfig     *tls.Config
 	HandlePublish func(*Conn)
 	HandlePlay    func(*Conn)
 	HandleConn    func(*Conn)
 
-	listener *net.TCPListener
+	listener net.Listener
 	doneChan chan struct{}
 }
 
@@ -94,23 +96,54 @@ func (self *Server) ListenAndServe() error {
 		addr = ":1935"
 	}
 
-	tcpaddr, err := net.ResolveTCPAddr("tcp", addr)
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("rtmp: %w", err)
 	}
 
-	listener, err := net.ListenTCP("tcp", tcpaddr)
+	return self.Serve(listener)
+}
+
+func (self *Server) ListenAndServeTLS(certFile, keyFile string) error {
+	addr := self.Addr
+	if addr == "" {
+		addr = ":1935"
+	}
+
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("rtmp: %w", err)
 	}
 
+	return self.ServeTLS(listener, certFile, keyFile)
+}
+
+func (self *Server) ServeTLS(listener net.Listener, certFile, keyFile string) error {
+	if self.TLSConfig == nil {
+		config := &tls.Config{
+			Certificates: make([]tls.Certificate, 1),
+		}
+
+		var err error
+		config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return fmt.Errorf("rtmp: %w", err)
+		}
+
+		listener = tls.NewListener(listener, config)
+	}
+
+	return self.Serve(listener)
+}
+
+func (self *Server) Serve(listener net.Listener) error {
 	self.doneChan = make(chan struct{})
 
 	self.listener = listener
-	defer func() { self.listener = nil }()
+	defer self.listener.Close()
 
 	if Debug {
-		fmt.Println("rtmp: server: listening on", addr)
+		fmt.Println("rtmp: server: listening on", self.listener.Addr().String())
 	}
 
 	for {
