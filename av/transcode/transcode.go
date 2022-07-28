@@ -1,22 +1,21 @@
-
 // Package transcoder implements Transcoder based on Muxer/Demuxer and AudioEncoder/AudioDecoder interface.
 package transcode
 
 import (
 	"fmt"
-	"time"
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/av/pktque"
+	"time"
 )
 
 var Debug bool
 
 type tStream struct {
-	codec av.CodecData
-	timeline *pktque.Timeline
+	codec              av.CodecData
+	timeline           *pktque.Timeline
 	aencodec, adecodec av.AudioCodecData
-	aenc av.AudioEncoder
-	adec av.AudioDecoder
+	aenc               av.AudioEncoder
+	adec               av.AudioDecoder
 }
 
 type Options struct {
@@ -27,7 +26,7 @@ type Options struct {
 }
 
 type Transcoder struct {
-	streams                 []*tStream
+	streams []*tStream
 }
 
 func NewTranscoder(streams []av.CodecData, options Options) (_self *Transcoder, err error) {
@@ -150,8 +149,8 @@ func (self *Transcoder) Close() (err error) {
 // Wrap transcoder and origin Muxer into new Muxer.
 // Write to new Muxer will do transcoding automatically.
 type Muxer struct {
-	av.Muxer // origin Muxer
-	Options // transcode options
+	av.Muxer   // origin Muxer
+	Options    // transcode options
 	transcoder *Transcoder
 }
 
@@ -195,7 +194,7 @@ type Demuxer struct {
 	av.Demuxer
 	Options
 	transcoder *Transcoder
-	outpkts []av.Packet
+	outpkts    []av.Packet
 }
 
 func (self *Demuxer) prepare() (err error) {
