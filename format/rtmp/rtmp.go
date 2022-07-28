@@ -321,6 +321,8 @@ const (
 	eventtypeStreamBegin      = 0
 	eventtypeSetBufferLength  = 3
 	eventtypeStreamIsRecorded = 4
+	eventtypePingRequest      = 6
+	eventtypePingResponse     = 7
 )
 
 func (self *Conn) NetConn() net.Conn {
@@ -428,11 +430,11 @@ func (self *Conn) writeBasicConf() (err error) {
 		return
 	}
 	// > WindowAckSize
-	if err = self.writeWindowAckSize(1024 * 1024 * 2); err != nil {
+	if err = self.writeWindowAckSize(1024 * 1024 * 3); err != nil {
 		return
 	}
 	// > SetPeerBandwidth
-	if err = self.writeSetPeerBandwidth(1024*1024*2, 0); err != nil {
+	if err = self.writeSetPeerBandwidth(1024*1024*3, 0); err != nil {
 		return
 	}
 	return
@@ -1130,6 +1132,17 @@ func (self *Conn) writeSetBufferLength(msgsid uint32, timestamp uint32) (err err
 	return
 }
 
+func (self *Conn) writePingResponse(timestamp uint32) (err error) {
+	b := self.tmpwbuf(chunkHeaderLength + 10)
+	n := self.fillChunkHeader(b, 2, 0, msgtypeidUserControl, 0, 6)
+	pio.PutU16BE(b[n:], eventtypePingResponse)
+	n += 2
+	pio.PutU32BE(b[n:], timestamp)
+	n += 4
+	_, err = self.bufw.Write(b[:n])
+	return
+}
+
 const chunkHeaderLength = 12
 const FlvTimestampMax = 0xFFFFFF
 
@@ -1470,6 +1483,16 @@ func (self *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 			return
 		}
 		self.eventtype = pio.U16BE(msgdata)
+
+		if self.eventtype == eventtypePingRequest {
+			if len(msgdata) != 6 {
+				err = fmt.Errorf("wrong length for UserControl.PingRequest")
+				return
+			}
+			pingtimestamp := pio.U32BE(msgdata[2:])
+			self.writePingResponse(pingtimestamp)
+			self.flushWrite()
+		}
 
 	case msgtypeidDataMsgAMF0:
 		b := msgdata
