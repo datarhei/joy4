@@ -1,14 +1,14 @@
 package main
 
 import (
-	"sync"
-	"io"
-	"net/http"
-	"github.com/datarhei/joy4/format"
 	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/av/pubsub"
-	"github.com/datarhei/joy4/format/rtmp"
+	"github.com/datarhei/joy4/format"
 	"github.com/datarhei/joy4/format/flv"
+	"github.com/datarhei/joy4/format/rtmp"
+	"io"
+	"net/http"
+	"sync"
 )
 
 func init() {

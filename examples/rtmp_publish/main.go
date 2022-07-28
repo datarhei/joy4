@@ -1,9 +1,9 @@
 package main
 
 import (
+	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/av/pktque"
 	"github.com/datarhei/joy4/format"
-	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/format/rtmp"
 )
 
@@ -24,4 +24,3 @@ func main() {
 	file.Close()
 	conn.Close()
 }
-

@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"flag"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -11,8 +11,8 @@ import (
 	"github.com/datarhei/joy4/av/pktque"
 	"github.com/datarhei/joy4/av/pubsub"
 	"github.com/datarhei/joy4/format"
-	"github.com/datarhei/joy4/format/rtmp"
 	"github.com/datarhei/joy4/format/flv/flvio"
+	"github.com/datarhei/joy4/format/rtmp"
 )
 
 func init() {
@@ -27,9 +27,9 @@ type channel struct {
 }
 
 type Config struct {
-	Addr   string
-	App    string
-	Token  string
+	Addr  string
+	App   string
+	Token string
 }
 
 type Server interface {
@@ -39,8 +39,8 @@ type Server interface {
 }
 
 type server struct {
-	app    string
-	token  string
+	app   string
+	token string
 
 	server *rtmp.Server
 
@@ -56,8 +56,8 @@ func New(config Config) (Server, error) {
 	}
 
 	s := &server{
-		app:    config.App,
-		token:  config.Token,
+		app:   config.App,
+		token: config.Token,
 	}
 
 	s.server = &rtmp.Server{
@@ -209,7 +209,10 @@ func (s *server) handlePublish(conn *rtmp.Conn) {
 		s.log("PUBLISH", "STREAM", conn.URL.Path, stream.Type().String(), client)
 	}
 
-	avutil.CopyPackets(ch.que, conn)
+	err := avutil.CopyPackets(ch.que, conn)
+	if err != nil {
+		s.log("PUBLISH", "ERROR", conn.URL.Path, err.Error(), client)
+	}
 
 	s.lock.Lock()
 	delete(s.channels, conn.URL.Path)

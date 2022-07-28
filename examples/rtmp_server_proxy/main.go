@@ -2,10 +2,10 @@ package main
 
 import (
 	"fmt"
-	"strings"
-	"github.com/datarhei/joy4/format"
 	"github.com/datarhei/joy4/av/avutil"
+	"github.com/datarhei/joy4/format"
 	"github.com/datarhei/joy4/format/rtmp"
+	"strings"
 )
 
 func init() {
