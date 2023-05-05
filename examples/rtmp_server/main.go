@@ -123,11 +123,11 @@ func (s *server) handlePlay(conn *rtmp.Conn) {
 
 		filters := pktque.Filters{}
 
-		if ch.hasVideo == true {
+		if ch.hasVideo {
 			filters = append(filters, &pktque.WaitKeyFrame{})
 		}
 
-		filters = append(filters, &pktque.FixTime{StartFromZero: true, MakeIncrement: true})
+		filters = append(filters, &pktque.FixTime{StartFromZero: true, MakeIncrement: false})
 
 		demuxer := &pktque.FilterDemuxer{
 			Filter:  filters,
