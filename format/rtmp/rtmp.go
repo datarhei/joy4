@@ -78,6 +78,7 @@ func (self *Server) handleConn(conn *Conn) (err error) {
 		}
 
 		if conn.playing {
+			fmt.Printf("play\n")
 			if self.HandlePlay != nil {
 				self.HandlePlay(conn)
 			}
@@ -463,6 +464,8 @@ func (self *Conn) readConnect() (err error) {
 		return
 	}
 
+	fmt.Printf("readConnect: %+v\n", self.commandobj)
+
 	var ok bool
 	var _app, _tcurl interface{}
 	if _app, ok = self.commandobj["app"]; !ok {
@@ -691,6 +694,8 @@ func (self *Conn) writeConnect(path string) (err error) {
 		return
 	}
 
+	fmt.Printf("writeConnect: app: %s\n", path)
+
 	// > connect("app")
 	if Debug {
 		fmt.Printf("rtmp: > connect('%s') host=%s\n", path, self.URL.Host)
@@ -705,6 +710,7 @@ func (self *Conn) writeConnect(path string) (err error) {
 			"audioCodecs":   4071,
 			"videoCodecs":   252,
 			"videoFunction": 1,
+			"fourCcList":    flvio.AMFArray{"av01", "vp09", "hvc1"},
 		},
 	); err != nil {
 		return
@@ -984,13 +990,18 @@ func (self *Conn) WriteHeader(streams []av.CodecData) (err error) {
 
 	var metadata flvio.AMFMap = nil
 
-	metadata = self.GetMetaData()
+	//metadata = self.GetMetaData()
+
+	fmt.Printf("WriteHeader\n")
 
 	if metadata == nil {
 		if metadata, err = flv.NewMetadataByStreams(streams); err != nil {
+			fmt.Printf("WriteHeader error: %s\n", err.Error())
 			return
 		}
 	}
+
+	fmt.Printf("WriteHeader: %#v\n", metadata)
 
 	// > onMetaData()
 	if err = self.writeDataMsg(5, self.avmsgsid, "onMetaData", metadata); err != nil {
@@ -1547,17 +1558,21 @@ func (self *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 
 		if metaindex != -1 && metaindex < len(self.datamsgvals) {
 			self.metadata = self.datamsgvals[metaindex].(flvio.AMFMap)
+			fmt.Printf("onMetadata: %+v\n", self.metadata)
+			fmt.Printf("videocodecid: %#08x (%f)\n", int64(self.metadata["videocodecid"].(float64)), self.metadata["videocodecid"].(float64))
 		}
 
 	case msgtypeidVideoMsg:
 		if len(msgdata) == 0 {
 			return
 		}
+		//fmt.Printf("msgdata: %#08x\n", msgdata[:5])
 		tag := flvio.Tag{Type: flvio.TAG_VIDEO}
 		var n int
 		if n, err = (&tag).ParseHeader(msgdata); err != nil {
 			return
 		}
+		//fmt.Printf("tag: %+v\n", tag)
 		if !(tag.FrameType == flvio.FRAME_INTER || tag.FrameType == flvio.FRAME_KEY) {
 			return
 		}

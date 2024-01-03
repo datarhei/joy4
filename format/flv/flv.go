@@ -2,16 +2,19 @@ package flv
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
+	"io"
+
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/codec"
 	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/codec/fake"
 	"github.com/datarhei/joy4/codec/h264parser"
+	"github.com/datarhei/joy4/codec/hevcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/datarhei/joy4/utils/bits/pio"
-	"io"
 )
 
 var MaxProbePacketCount = 20
@@ -27,6 +30,8 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 			switch typ {
 			case av.H264:
 				metadata["videocodecid"] = flvio.VIDEO_H264
+			case av.HEVC:
+				metadata["videocodecid"] = flvio.FourCCToFloat(flvio.FOURCC_HEVC)
 
 			default:
 				err = fmt.Errorf("flv: metadata: unsupported video codecType=%v", stream.Type())
@@ -83,21 +88,42 @@ func (self *Prober) PushTag(tag flvio.Tag, timestamp int32) (err error) {
 
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
-		switch tag.AVCPacketType {
-		case flvio.AVC_SEQHDR:
-			if !self.GotVideo {
-				var stream h264parser.CodecData
-				if stream, err = h264parser.NewCodecDataFromAVCDecoderConfRecord(tag.Data); err != nil {
-					err = fmt.Errorf("flv: h264 seqhdr invalid: %s", err.Error())
-					return
+		if tag.IsExHeader {
+			if tag.FourCC == flvio.FOURCC_HEVC {
+				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
+					if !self.GotVideo {
+						var stream hevcparser.CodecData
+						fmt.Printf("got HEVC sequence start:\n%s\n", hex.Dump(tag.Data))
+						if stream, err = hevcparser.NewCodecDataFromHEVCDecoderConfRecord(tag.Data); err != nil {
+							err = fmt.Errorf("flv: hevc seqhdr invalid: %s", err.Error())
+							return
+						}
+						self.VideoStreamIdx = len(self.Streams)
+						self.Streams = append(self.Streams, stream)
+						self.GotVideo = true
+					}
+				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
+					self.CacheTag(tag, timestamp)
 				}
-				self.VideoStreamIdx = len(self.Streams)
-				self.Streams = append(self.Streams, stream)
-				self.GotVideo = true
 			}
+		} else {
+			switch tag.AVCPacketType {
+			case flvio.AVC_SEQHDR:
+				if !self.GotVideo {
+					var stream h264parser.CodecData
+					fmt.Printf("got H264 sequence start:\n%s\n", hex.Dump(tag.Data))
+					if stream, err = h264parser.NewCodecDataFromAVCDecoderConfRecord(tag.Data); err != nil {
+						err = fmt.Errorf("flv: h264 seqhdr invalid: %s", err.Error())
+						return
+					}
+					self.VideoStreamIdx = len(self.Streams)
+					self.Streams = append(self.Streams, stream)
+					self.GotVideo = true
+				}
 
-		case flvio.AVC_NALU:
-			self.CacheTag(tag, timestamp)
+			case flvio.AVC_NALU:
+				self.CacheTag(tag, timestamp)
+			}
 		}
 
 	case flvio.TAG_AUDIO:
@@ -166,8 +192,8 @@ func (self *Prober) TagToPacket(tag flvio.Tag, timestamp int32) (pkt av.Packet, 
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
 		pkt.Idx = int8(self.VideoStreamIdx)
-		switch tag.AVCPacketType {
-		case flvio.AVC_NALU:
+		switch tag.PacketType {
+		case flvio.PKTTYPE_CODED_FRAMES, flvio.PKTTYPE_CODED_FRAMESX:
 			ok = true
 			pkt.Data = tag.Data
 			pkt.CompositionTime = flvio.TsToTime(tag.CompositionTime)
@@ -219,6 +245,22 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 			Data:          h264.AVCDecoderConfRecordBytes(),
 			FrameType:     flvio.FRAME_KEY,
 		}
+		fmt.Printf("set H264 sequence start:\n%v\n", hex.Dump(h264.AVCDecoderConfRecordBytes()))
+		ok = true
+		_tag = tag
+
+	case av.HEVC:
+		fmt.Printf("CodecDataToTag for HEVC\n")
+		hevc := stream.(hevcparser.CodecData)
+		tag := flvio.Tag{
+			Type:       flvio.TAG_VIDEO,
+			IsExHeader: true,
+			PacketType: flvio.PKTTYPE_SEQUENCE_START,
+			FourCC:     flvio.FOURCC_HEVC,
+			Data:       hevc.HEVCDecoderConfRecordBytes(),
+			FrameType:  flvio.FRAME_KEY,
+		}
+		fmt.Printf("set HEVC sequence start:\n%v\n", hex.Dump(hevc.HEVCDecoderConfRecordBytes()))
 		ok = true
 		_tag = tag
 
@@ -266,6 +308,27 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 			Data:            pkt.Data,
 			CompositionTime: flvio.TimeToTs(pkt.CompositionTime),
 		}
+		if pkt.IsKeyFrame {
+			tag.FrameType = flvio.FRAME_KEY
+		} else {
+			tag.FrameType = flvio.FRAME_INTER
+		}
+
+	case av.HEVC:
+		//fmt.Printf("PacketToTag for HEVC\n")
+		tag = flvio.Tag{
+			Type:            flvio.TAG_VIDEO,
+			IsExHeader:      true,
+			PacketType:      flvio.PKTTYPE_CODED_FRAMES,
+			CompositionTime: flvio.TimeToTs(pkt.CompositionTime),
+			FourCC:          flvio.FOURCC_HEVC,
+			Data:            pkt.Data,
+		}
+
+		if pkt.CompositionTime == 0 {
+			tag.PacketType = flvio.PKTTYPE_CODED_FRAMESX
+		}
+
 		if pkt.IsKeyFrame {
 			tag.FrameType = flvio.FRAME_KEY
 		} else {

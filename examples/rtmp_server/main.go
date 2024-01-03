@@ -116,7 +116,7 @@ func (s *server) handlePlay(conn *rtmp.Conn) {
 	s.lock.RUnlock()
 
 	if ch != nil {
-		conn.SetMetaData(ch.metadata)
+		//conn.SetMetaData(ch.metadata)
 
 		s.log("PLAY", "START", conn.URL.Path, "", client)
 		cursor := ch.que.Oldest()
@@ -139,8 +139,6 @@ func (s *server) handlePlay(conn *rtmp.Conn) {
 	} else {
 		s.log("PLAY", "NOTFOUND", conn.URL.Path, "", client)
 	}
-
-	return
 }
 
 func (s *server) handlePublish(conn *rtmp.Conn) {
@@ -169,14 +167,14 @@ func (s *server) handlePublish(conn *rtmp.Conn) {
 		return
 	}
 
-	metadata := conn.GetMetaData()
+	//metadata := conn.GetMetaData()
 
 	s.lock.Lock()
 
 	ch := s.channels[conn.URL.Path]
 	if ch == nil {
 		ch = &channel{}
-		ch.metadata = metadata
+		//ch.metadata = metadata
 		ch.que = pubsub.NewQueue()
 		ch.que.WriteHeader(streams)
 		for _, stream := range streams {
@@ -221,8 +219,6 @@ func (s *server) handlePublish(conn *rtmp.Conn) {
 	ch.que.Close()
 
 	s.log("PUBLISH", "STOP", conn.URL.Path, "", client)
-
-	return
 }
 
 func main() {
