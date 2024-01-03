@@ -134,19 +134,28 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int32) (err error) {
 					prober.CacheTag(tag, timestamp)
 				}
 			} else if tag.FourCC == flvio.FOURCC_AV1 {
-				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
+				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START || tag.PacketType == flvio.PKTTYPE_MPEG2TS_SEQUENCE_START {
 					if !prober.GotVideo {
 						var stream av1parser.CodecData
-						//fmt.Printf("got AV1 sequence start:\n%s\n", hex.Dump(tag.Data))
-						if stream, err = av1parser.NewCodecDataFromAV1DecoderConfRecord(tag.Data); err != nil {
-							err = fmt.Errorf("flv: av1 seqhdr invalid: %s", err.Error())
-							return
+
+						if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
+							//fmt.Printf("got AV1 sequence start:\n%s\n", hex.Dump(tag.Data))
+							if stream, err = av1parser.NewCodecDataFromAV1DecoderConfRecord(tag.Data); err != nil {
+								err = fmt.Errorf("flv: av1 seqhdr invalid: %s", err.Error())
+								return
+							}
+						} else {
+							//fmt.Printf("got AV1 video descriptor:\n%s\n", hex.Dump(tag.Data))
+							if stream, err = av1parser.NewCodecDataFromAV1VideoDescriptor(tag.Data); err != nil {
+								err = fmt.Errorf("flv: av1 video descriptor invalid: %s", err.Error())
+								return
+							}
 						}
 						prober.VideoStreamIdx = len(prober.Streams)
 						prober.Streams = append(prober.Streams, stream)
 						prober.GotVideo = true
 					}
-				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX || tag.PacketType == flvio.PKTTYPE_MPEG2TS_SEQUENCE_START {
+				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
 					prober.CacheTag(tag, timestamp)
 				}
 			}
@@ -289,7 +298,7 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 			Data:          h264.AVCDecoderConfRecordBytes(),
 			FrameType:     flvio.FRAME_KEY,
 		}
-		//fmt.Printf("set H264 sequence start:\n%v\n", hex.Dump(h264.AVCDecoderConfRecordBytes()))
+		//fmt.Printf("set H264 sequence start:\n%v\n", hex.Dump(tag.Data))
 		ok = true
 		_tag = tag
 
@@ -303,7 +312,7 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 			Data:       hevc.HEVCDecoderConfRecordBytes(),
 			FrameType:  flvio.FRAME_KEY,
 		}
-		//fmt.Printf("set HEVC sequence start:\n%v\n", hex.Dump(hevc.HEVCDecoderConfRecordBytes()))
+		//fmt.Printf("set HEVC sequence start:\n%v\n", hex.Dump(tag.Data))
 		ok = true
 		_tag = tag
 
@@ -317,7 +326,7 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 			Data:       vp9.VPDecoderConfRecordBytes(),
 			FrameType:  flvio.FRAME_KEY,
 		}
-		//fmt.Printf("set VP9 sequence start:\n%v\n", hex.Dump(vp9.VPDecoderConfRecordBytes()))
+		//fmt.Printf("set VP9 sequence start:\n%v\n", hex.Dump(tag.Data))
 		ok = true
 		_tag = tag
 
@@ -331,7 +340,13 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 			Data:       av1.AV1DecoderConfRecordBytes(),
 			FrameType:  flvio.FRAME_KEY,
 		}
-		//fmt.Printf("set AV1 sequence start:\n%v\n", hex.Dump(av1.AV1DecoderConfRecordBytes()))
+
+		if av1.IsMpeg2TS {
+			tag.PacketType = flvio.PKTTYPE_MPEG2TS_SEQUENCE_START
+			tag.Data = av1.AV1VideoDescriptorBytes()
+		}
+
+		//fmt.Printf("set AV1 sequence start:\n%v\n", hex.Dump(tag.Data))
 		ok = true
 		_tag = tag
 

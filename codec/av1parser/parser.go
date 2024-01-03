@@ -5,7 +5,8 @@ import (
 )
 
 type CodecData struct {
-	Record []byte
+	Record    []byte
+	IsMpeg2TS bool
 }
 
 func (codec CodecData) Type() av.CodecType {
@@ -13,6 +14,10 @@ func (codec CodecData) Type() av.CodecType {
 }
 
 func (codec CodecData) AV1DecoderConfRecordBytes() []byte {
+	return codec.Record
+}
+
+func (codec CodecData) AV1VideoDescriptorBytes() []byte {
 	return codec.Record
 }
 
@@ -24,8 +29,16 @@ func (codec CodecData) Height() int {
 	return 0
 }
 
-func NewCodecDataFromAV1DecoderConfRecord(record []byte) (self CodecData, err error) {
-	self.Record = record
+func NewCodecDataFromAV1DecoderConfRecord(record []byte) (data CodecData, err error) {
+	data.Record = record
+	data.IsMpeg2TS = false
+
+	return
+}
+
+func NewCodecDataFromAV1VideoDescriptor(record []byte) (data CodecData, err error) {
+	data.Record = record
+	data.IsMpeg2TS = true
 
 	return
 }
