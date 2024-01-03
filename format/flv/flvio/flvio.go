@@ -316,7 +316,7 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 		}
 	}
 
-	//fmt.Printf("parseVideoHeader: PacketType: %d\n%s\n", t.PacketType, hex.Dump(b[:n]))
+	//fmt.Printf("parseVideoHeader: PacketType: %d\n", t.PacketType)
 
 	return
 }

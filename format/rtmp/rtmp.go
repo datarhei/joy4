@@ -78,7 +78,6 @@ func (self *Server) handleConn(conn *Conn) (err error) {
 		}
 
 		if conn.playing {
-			fmt.Printf("play\n")
 			if self.HandlePlay != nil {
 				self.HandlePlay(conn)
 			}
@@ -464,7 +463,7 @@ func (self *Conn) readConnect() (err error) {
 		return
 	}
 
-	fmt.Printf("readConnect: %+v\n", self.commandobj)
+	//fmt.Printf("readConnect: %+v\n", self.commandobj)
 
 	var ok bool
 	var _app, _tcurl interface{}
@@ -992,16 +991,11 @@ func (self *Conn) WriteHeader(streams []av.CodecData) (err error) {
 
 	//metadata = self.GetMetaData()
 
-	fmt.Printf("WriteHeader\n")
-
 	if metadata == nil {
 		if metadata, err = flv.NewMetadataByStreams(streams); err != nil {
-			fmt.Printf("WriteHeader error: %s\n", err.Error())
 			return
 		}
 	}
-
-	fmt.Printf("WriteHeader: %#v\n", metadata)
 
 	// > onMetaData()
 	if err = self.writeDataMsg(5, self.avmsgsid, "onMetaData", metadata); err != nil {
@@ -1558,8 +1552,8 @@ func (self *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 
 		if metaindex != -1 && metaindex < len(self.datamsgvals) {
 			self.metadata = self.datamsgvals[metaindex].(flvio.AMFMap)
-			fmt.Printf("onMetadata: %+v\n", self.metadata)
-			fmt.Printf("videocodecid: %#08x (%f)\n", int64(self.metadata["videocodecid"].(float64)), self.metadata["videocodecid"].(float64))
+			//fmt.Printf("onMetadata: %+v\n", self.metadata)
+			//fmt.Printf("videocodecid: %#08x (%f)\n", int64(self.metadata["videocodecid"].(float64)), self.metadata["videocodecid"].(float64))
 		}
 
 	case msgtypeidVideoMsg:
