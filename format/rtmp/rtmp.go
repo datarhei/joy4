@@ -429,16 +429,20 @@ func createURL(tcurl, app, play string) (*url.URL, error) {
 var CodecTypes = flv.CodecTypes
 
 func (conn *Conn) writeBasicConf() (err error) {
-	// > SetChunkSize
-	if err = conn.writeSetChunkSize(1024 * 1024 * 1); err != nil {
-		return
-	}
 	// > WindowAckSize
-	if err = conn.writeWindowAckSize(1024 * 1024 * 3); err != nil {
+	if err = conn.writeWindowAckSize(1024 * 1024 * 2); err != nil {
 		return
 	}
 	// > SetPeerBandwidth
-	if err = conn.writeSetPeerBandwidth(1024*1024*3, 0); err != nil {
+	if err = conn.writeSetPeerBandwidth(1024*1024*2, 2); err != nil {
+		return
+	}
+	// > StreamBegin
+	if err = conn.writeStreamBegin(0); err != nil {
+		return
+	}
+	// > SetChunkSize
+	if err = conn.writeSetChunkSize(1024 * 1024); err != nil {
 		return
 	}
 	return
@@ -460,7 +464,7 @@ func (conn *Conn) readConnect() (err error) {
 		return
 	}
 
-	//fmt.Printf("readConnect: %+v\n", self.commandobj)
+	//fmt.Printf("readConnect: %+v\n", conn.commandobj)
 
 	var ok bool
 	var _app, _tcurl interface{}
