@@ -1295,8 +1295,8 @@ func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp 
 func (c *Conn) fillChunkHeader3(b []byte, csid uint32, timestamp int32) (n int) {
 	pio.PutU8(b, (uint8(csid)&0x3f)|3<<6)
 	n++
-	if timestamp >= FlvTimestampMax {
-		pio.PutU32BE(b, uint32(timestamp))
+	if uint32(timestamp) >= FlvTimestampMax {
+		pio.PutU32BE(b[n:], uint32(timestamp))
 		n += 4
 	}
 
