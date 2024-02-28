@@ -1286,7 +1286,7 @@ func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp 
 
 	if Debug {
 		fmt.Printf("rtmp: write chunk msgdatalen=%d msgsid=%d\n", msgdatalen, msgsid)
-		fmt.Print(hex.Dump(b[:n+msgdatalen]))
+		fmt.Print(hex.Dump(b[:n]))
 	}
 
 	return
