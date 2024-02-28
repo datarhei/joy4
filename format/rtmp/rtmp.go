@@ -250,6 +250,8 @@ type Conn struct {
 	metadata flvio.AMFMap
 
 	eventtype uint16
+
+	start time.Time
 }
 
 type txrxcount struct {
@@ -282,11 +284,13 @@ func NewConn(netconn net.Conn) *Conn {
 	conn.bufw = bufio.NewWriterSize(conn.txrxcount, pio.RecommendBufioSize)
 	conn.writebuf = make([]byte, 4096)
 	conn.readbuf = make([]byte, 4096)
+	conn.start = time.Now()
 	return conn
 }
 
 type chunkStream struct {
 	timenow     uint32
+	prevtimenow uint32
 	timedelta   uint32
 	hastimeext  bool
 	msgsid      uint32
@@ -1514,9 +1518,19 @@ func (conn *Conn) readChunk() (err error) {
 			fmt.Print(hex.Dump(cs.msgdata))
 		}
 
-		if err = conn.handleMsg(cs.timenow, cs.msgsid, cs.msgtypeid, cs.msgdata); err != nil {
+		timestamp = cs.timenow
+
+		if cs.msgtypeid == msgtypeidVideoMsg || cs.msgtypeid == msgtypeidAudioMsg {
+			if cs.prevtimenow == cs.timenow {
+				timestamp = uint32(time.Since(conn.start).Milliseconds())
+			}
+		}
+
+		if err = conn.handleMsg(timestamp, cs.msgsid, cs.msgtypeid, cs.msgdata); err != nil {
 			return fmt.Errorf("handleMsg: %w", err)
 		}
+
+		cs.prevtimenow = cs.timenow
 	}
 
 	conn.ackn += uint32(n)
