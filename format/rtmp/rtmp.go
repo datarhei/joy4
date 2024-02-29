@@ -1534,7 +1534,7 @@ func (conn *Conn) readChunk() (err error) {
 			}
 
 			if cs.gentimenow {
-				timestamp = uint32(time.Since(conn.start).Milliseconds())
+				timestamp = uint32((time.Since(conn.start).Milliseconds() % 0xFFFFFFFF) & 0xFFFFFFFF)
 			}
 		}
 
