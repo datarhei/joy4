@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -38,10 +39,12 @@ func main() {
 		if s.Type().IsVideo() {
 			fmt.Printf("video: %s\n", s.Type().String())
 			v := s.(h264parser.CodecData)
-			os.Stdout.Write(v.AVCDecoderConfRecordBytes())
+			fmt.Printf("%s", hex.Dump(v.AVCDecoderConfRecordBytes()))
 			idx = int8(i)
 		}
 	}
+
+	var bytes uint64 = 0
 
 	for {
 		p, err := src.ReadPacket()
@@ -53,6 +56,8 @@ func main() {
 			continue
 		}
 
-		os.Stdout.Write(p.Data)
+		bytes += uint64(len(p.Data))
+
+		fmt.Printf("%d\r", bytes)
 	}
 }
