@@ -291,6 +291,8 @@ func NewConn(netconn net.Conn) *Conn {
 type chunkStream struct {
 	timenow     uint32
 	prevtimenow uint32
+	tscount     int
+	gentimenow  bool
 	timedelta   uint32
 	hastimeext  bool
 	msgsid      uint32
@@ -1521,7 +1523,19 @@ func (conn *Conn) readChunk() (err error) {
 		timestamp = cs.timenow
 
 		if cs.msgtypeid == msgtypeidVideoMsg || cs.msgtypeid == msgtypeidAudioMsg {
-			if cs.prevtimenow == cs.timenow {
+			if !cs.gentimenow {
+				if cs.prevtimenow >= cs.timenow {
+					cs.tscount++
+				} else {
+					cs.tscount = 0
+				}
+
+				if cs.tscount > 3 {
+					cs.gentimenow = true
+				}
+			}
+
+			if cs.gentimenow {
 				timestamp = uint32(time.Since(conn.start).Milliseconds())
 			}
 		}
