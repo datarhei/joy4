@@ -712,8 +712,6 @@ func (conn *Conn) writeConnect(path string) (err error) {
 		return
 	}
 
-	fmt.Printf("writeConnect: app: %s\n", path)
-
 	// > connect("app")
 	if Debug {
 		fmt.Printf("rtmp: > connect('%s') host=%s\n", path, conn.URL.Host)
