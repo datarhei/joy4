@@ -61,7 +61,8 @@ func New(config Config) (Server, error) {
 	}
 
 	s.server = &rtmp.Server{
-		Addr: config.Addr,
+		Addr:                config.Addr,
+		MaxProbePacketCount: 40,
 	}
 
 	s.channels = make(map[string]*channel)
