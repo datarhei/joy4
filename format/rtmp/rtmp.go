@@ -65,6 +65,8 @@ type Server struct {
 	HandlePlay    func(*Conn)
 	HandleConn    func(*Conn)
 
+	MaxProbePacketCount int
+
 	listener net.Listener
 	doneChan chan struct{}
 }
@@ -172,6 +174,7 @@ func (s *Server) Serve(listener net.Listener) error {
 		}
 
 		conn := NewConn(netconn)
+		conn.prober = flv.NewProber(s.MaxProbePacketCount)
 		conn.isserver = true
 		go func() {
 			err := s.handleConn(conn)
@@ -1005,14 +1008,10 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 		return
 	}
 
-	var metadata flvio.AMFMap = nil
+	var metadata flvio.AMFMap
 
-	//metadata = self.GetMetaData()
-
-	if metadata == nil {
-		if metadata, err = flv.NewMetadataByStreams(streams); err != nil {
-			return
-		}
+	if metadata, err = flv.NewMetadataByStreams(streams); err != nil {
+		return
 	}
 
 	// > onMetaData()
@@ -1676,8 +1675,14 @@ func (conn *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 
 		if metaindex != -1 && metaindex < len(conn.datamsgvals) {
 			conn.metadata = conn.datamsgvals[metaindex].(flvio.AMFMap)
-			//fmt.Printf("onMetadata: %+v\n", self.metadata)
-			//fmt.Printf("videocodecid: %#08x (%f)\n", int64(self.metadata["videocodecid"].(float64)), self.metadata["videocodecid"].(float64))
+			//fmt.Printf("onMetadata: %+v\n", conn.metadata)
+			if _, hasVideo := conn.metadata["videocodecid"]; hasVideo {
+				conn.prober.HasVideo = true
+			}
+
+			if _, hasAudio := conn.metadata["audiocodecid"]; hasAudio {
+				conn.prober.HasAudio = true
+			}
 		}
 
 	case msgtypeidVideoMsg:
