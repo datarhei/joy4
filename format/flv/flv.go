@@ -248,13 +248,11 @@ func (prober *Prober) Probed() (ok bool) {
 
 	if prober.HasAudio || prober.HasVideo {
 		if prober.HasAudio == prober.GotAudio && prober.HasVideo == prober.GotVideo {
-			fmt.Printf("probed %d packets\n", prober.PushedCount)
 			return true
 		}
 	}
 
 	if prober.PushedCount == prober.MaxProbePacketCount {
-		fmt.Printf("probed max. %d packets\n", prober.PushedCount)
 		return true
 	}
 
