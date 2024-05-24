@@ -1613,6 +1613,7 @@ func (conn *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 	switch msgtypeid {
 	case msgtypeidCommandMsgAMF0:
 		if _, err = conn.handleCommandMsgAMF0(msgdata); err != nil {
+			err = fmt.Errorf("AMF0: %w, %s", err, hex.EncodeToString(msgdata))
 			return
 		}
 
@@ -1623,6 +1624,7 @@ func (conn *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 		}
 		// skip first byte
 		if _, err = conn.handleCommandMsgAMF0(msgdata[1:]); err != nil {
+			err = fmt.Errorf("AMF3: %w, %s", err, hex.EncodeToString(msgdata))
 			return
 		}
 
