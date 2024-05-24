@@ -66,6 +66,7 @@ type Server struct {
 	HandleConn    func(*Conn)
 
 	MaxProbePacketCount int
+	SkipInvalidMessages bool
 
 	listener net.Listener
 	doneChan chan struct{}
@@ -175,6 +176,7 @@ func (s *Server) Serve(listener net.Listener) error {
 
 		conn := NewConn(netconn)
 		conn.prober = flv.NewProber(s.MaxProbePacketCount)
+		conn.skipInvalidMessages = s.SkipInvalidMessages
 		conn.isserver = true
 		go func() {
 			err := s.handleConn(conn)
@@ -255,6 +257,8 @@ type Conn struct {
 	eventtype uint16
 
 	start time.Time
+
+	skipInvalidMessages bool
 }
 
 type txrxcount struct {
@@ -1367,8 +1371,10 @@ func (conn *Conn) readChunk() (err error) {
 		//
 		//       Figure 9 Chunk Message Header – Type 0
 		if cs.msgdataleft != 0 {
-			err = fmt.Errorf("chunk msgdataleft=%d invalid", cs.msgdataleft)
-			return
+			if !conn.skipInvalidMessages {
+				err = fmt.Errorf("chunk msgdataleft=%d invalid", cs.msgdataleft)
+				return
+			}
 		}
 		h := b[:11]
 		if _, err = io.ReadFull(conn.bufr, h); err != nil {
@@ -1404,8 +1410,10 @@ func (conn *Conn) readChunk() (err error) {
 		//
 		//       Figure 10 Chunk Message Header – Type 1
 		if cs.msgdataleft != 0 {
-			err = fmt.Errorf("chunk msgdataleft=%d invalid", cs.msgdataleft)
-			return
+			if !conn.skipInvalidMessages {
+				err = fmt.Errorf("chunk msgdataleft=%d invalid", cs.msgdataleft)
+				return
+			}
 		}
 		h := b[:7]
 		if _, err = io.ReadFull(conn.bufr, h); err != nil {
@@ -1439,8 +1447,10 @@ func (conn *Conn) readChunk() (err error) {
 		//
 		//       Figure 11 Chunk Message Header – Type 2
 		if cs.msgdataleft != 0 {
-			err = fmt.Errorf("chunk msgdataleft=%d invalid", cs.msgdataleft)
-			return
+			if !conn.skipInvalidMessages {
+				err = fmt.Errorf("chunk msgdataleft=%d invalid", cs.msgdataleft)
+				return
+			}
 		}
 		h := b[:3]
 		if _, err = io.ReadFull(conn.bufr, h); err != nil {
