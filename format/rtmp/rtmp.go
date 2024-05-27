@@ -1553,8 +1553,16 @@ func (conn *Conn) readChunk() (err error) {
 			csid, cs.msgsid, cs.msgtypeid, cs.msghdrtype, cs.timenow, cs.msgdatalen, cs.msgdataleft, conn.readMaxChunkSize)
 
 		if cs.msgtypeid != msgtypeidVideoMsg && cs.msgtypeid != msgtypeidAudioMsg {
-			data += " data=" + hex.EncodeToString(cs.msgdata)
+			if len(cs.msgdata) > 1024 {
+				data += " data=" + hex.EncodeToString(cs.msgdata[:1024]) + "... "
+			} else {
+				data += " data=" + hex.EncodeToString(cs.msgdata) + " "
+			}
+		} else {
+			data += " data= "
 		}
+
+		data += fmt.Sprintf("(%d bytes)", len(cs.msgdata))
 
 		fmt.Printf("%s\n", data)
 	}
@@ -1652,7 +1660,7 @@ func (conn *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 	switch msgtypeid {
 	case msgtypeidCommandMsgAMF0:
 		if _, err = conn.handleCommandMsgAMF0(msgdata); err != nil {
-			err = fmt.Errorf("AMF0: %w, %s", err, hex.EncodeToString(msgdata))
+			err = fmt.Errorf("AMF0: %w", err)
 			return
 		}
 
@@ -1663,7 +1671,7 @@ func (conn *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 		}
 		// skip first byte
 		if _, err = conn.handleCommandMsgAMF0(msgdata[1:]); err != nil {
-			err = fmt.Errorf("AMF3: %w, %s", err, hex.EncodeToString(msgdata))
+			err = fmt.Errorf("AMF3: %w", err)
 			return
 		}
 
