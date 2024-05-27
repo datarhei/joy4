@@ -63,6 +63,9 @@ func New(config Config) (Server, error) {
 	s.server = &rtmp.Server{
 		Addr:                config.Addr,
 		MaxProbePacketCount: 40,
+		DebugChunks: func(_ net.Conn) bool {
+			return true
+		},
 	}
 
 	s.channels = make(map[string]*channel)

@@ -67,9 +67,29 @@ type Server struct {
 
 	MaxProbePacketCount int
 	SkipInvalidMessages bool
+	DebugChunks         func(conn net.Conn) bool
 
 	listener net.Listener
 	doneChan chan struct{}
+}
+
+func (s *Server) HandleNetConn(netconn net.Conn) (err error) {
+	conn := NewConn(netconn)
+	conn.prober = flv.NewProber(s.MaxProbePacketCount)
+	conn.skipInvalidMessages = s.SkipInvalidMessages
+	if s.DebugChunks != nil {
+		conn.debugChunks = s.DebugChunks(netconn)
+	}
+	conn.isserver = true
+
+	err = s.handleConn(conn)
+	if Debug {
+		fmt.Println("rtmp: server: client closed err:", err)
+	}
+
+	conn.Close()
+
+	return
 }
 
 func (s *Server) handleConn(conn *Conn) (err error) {
@@ -174,17 +194,12 @@ func (s *Server) Serve(listener net.Listener) error {
 			fmt.Println("rtmp: server: accepted")
 		}
 
-		conn := NewConn(netconn)
-		conn.prober = flv.NewProber(s.MaxProbePacketCount)
-		conn.skipInvalidMessages = s.SkipInvalidMessages
-		conn.isserver = true
-		go func() {
-			err := s.handleConn(conn)
+		go func(conn net.Conn) {
+			err := s.HandleNetConn(conn)
 			if Debug {
 				fmt.Println("rtmp: server: client closed err:", err)
 			}
-			conn.Close()
-		}()
+		}(netconn)
 	}
 }
 
@@ -259,6 +274,8 @@ type Conn struct {
 	start time.Time
 
 	skipInvalidMessages bool
+
+	debugChunks bool
 }
 
 type txrxcount struct {
@@ -387,6 +404,15 @@ func (conn *Conn) pollMsg() (err error) {
 		if err = conn.readChunk(); err != nil {
 			return
 		}
+
+		if conn.readAckSize != 0 && conn.ackn > conn.readAckSize {
+			if err = conn.writeAck(conn.ackn, false); err != nil {
+				return fmt.Errorf("writeACK: %w", err)
+			}
+			conn.flushWrite()
+			conn.ackn = 0
+		}
+
 		if conn.gotmsg {
 			return
 		}
@@ -1518,8 +1544,19 @@ func (conn *Conn) readChunk() (err error) {
 	cs.msgdataleft -= uint32(size)
 
 	if Debug {
-		fmt.Printf("rtmp: chunk msgsid=%d msgtypeid=%d msghdrtype=%d len=%d left=%d\n",
-			cs.msgsid, cs.msgtypeid, cs.msghdrtype, cs.msgdatalen, cs.msgdataleft)
+		fmt.Printf("rtmp: chunk msgsid=%d msgtypeid=%d msghdrtype=%d len=%d left=%d max=%d",
+			cs.msgsid, cs.msgtypeid, cs.msghdrtype, cs.msgdatalen, cs.msgdataleft, conn.readMaxChunkSize)
+	}
+
+	if conn.debugChunks {
+		data := fmt.Sprintf("rtmp: chunk id=%d msgsid=%d msgtypeid=%d msghdrtype=%d timestamp=%d len=%d left=%d max=%d",
+			csid, cs.msgsid, cs.msgtypeid, cs.msghdrtype, cs.timenow, cs.msgdatalen, cs.msgdataleft, conn.readMaxChunkSize)
+
+		if cs.msgtypeid != msgtypeidVideoMsg && cs.msgtypeid != msgtypeidAudioMsg {
+			data += " data=" + hex.EncodeToString(cs.msgdata)
+		}
+
+		fmt.Printf("%s\n", data)
 	}
 
 	if cs.msgdataleft == 0 {
@@ -1561,14 +1598,6 @@ func (conn *Conn) readChunk() (err error) {
 	}
 
 	conn.ackn += uint32(n)
-
-	if conn.readAckSize != 0 && conn.ackn > conn.readAckSize {
-		if err = conn.writeAck(conn.ackn, false); err != nil {
-			return fmt.Errorf("writeACK: %w", err)
-		}
-		conn.flushWrite()
-		conn.ackn = 0
-	}
 
 	return
 }
