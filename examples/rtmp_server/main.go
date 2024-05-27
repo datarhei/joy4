@@ -226,18 +226,19 @@ func (s *server) handlePublish(conn *rtmp.Conn) {
 }
 
 func main() {
+	var addr string
 	var cert string
 	var key string
-	var help bool
 
+	flag.StringVar(&addr, "addr", "", "Address to listen on")
 	flag.StringVar(&cert, "cert", "", "Path to the certifacate file")
 	flag.StringVar(&key, "key", "", "Path to the key file")
-	flag.BoolVar(&help, "h", false, "Show options")
+	//flag.BoolVar(&help, "h", false, "Show options")
 
 	flag.Parse()
 
 	config := Config{
-		Addr: ":1935",
+		Addr: addr,
 	}
 
 	server, _ := New(config)
