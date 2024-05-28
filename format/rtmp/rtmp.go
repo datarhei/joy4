@@ -1421,7 +1421,7 @@ func (conn *Conn) readChunk() (err error) {
 		cs.msgdatalen = pio.U24BE(h[3:6])
 		cs.msgtypeid = h[6]
 		cs.msgsid = pio.U32LE(h[7:11])
-		if timestamp == 0xffffff {
+		if timestamp == FlvTimestampMax {
 			if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
 				return
 			}
@@ -1464,7 +1464,7 @@ func (conn *Conn) readChunk() (err error) {
 		cs.msghdrtype = msghdrtype
 		cs.msgdatalen = pio.U24BE(h[3:6])
 		cs.msgtypeid = h[6]
-		if timestamp == 0xffffff {
+		if timestamp == FlvTimestampMax {
 			if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
 				return
 			}
@@ -1504,7 +1504,7 @@ func (conn *Conn) readChunk() (err error) {
 		n += len(h)
 		cs.msghdrtype = msghdrtype
 		timestamp = pio.U24BE(h[0:3])
-		if timestamp == 0xffffff {
+		if timestamp == FlvTimestampMax {
 			if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
 				return
 			}
