@@ -64,7 +64,7 @@ func New(config Config) (Server, error) {
 		Addr:                config.Addr,
 		MaxProbePacketCount: 40,
 		DebugChunks: func(_ net.Conn) bool {
-			return true
+			return false
 		},
 	}
 
