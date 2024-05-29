@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/datarhei/joy4/av"
-	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/format"
+	"github.com/datarhei/joy4/format/rtmp"
 )
 
 func init() {
@@ -21,10 +22,12 @@ func main() {
 		log.Fatalf("%s [url]", os.Args[0])
 	}
 
-	src, err := avutil.Open(os.Args[1])
+	src, err := rtmp.Dial(os.Args[1])
 	if err != nil {
 		log.Fatalf("error connecting: %s", err.Error())
 	}
+
+	src.SetIdleTimeout(10 * time.Second)
 
 	defer src.Close()
 
@@ -45,6 +48,8 @@ func main() {
 	}
 
 	var bytes uint64 = 0
+
+	src.SetWriteIdleTimeout(0)
 
 	for {
 		p, err := src.ReadPacket()

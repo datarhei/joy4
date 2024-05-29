@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/av/pktque"
@@ -66,6 +67,7 @@ func New(config Config) (Server, error) {
 		DebugChunks: func(_ net.Conn) bool {
 			return false
 		},
+		ConnectionIdleTimeout: 10 * time.Second,
 	}
 
 	s.channels = make(map[string]*channel)
