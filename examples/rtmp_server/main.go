@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -12,7 +13,6 @@ import (
 	"github.com/datarhei/joy4/av/pktque"
 	"github.com/datarhei/joy4/av/pubsub"
 	"github.com/datarhei/joy4/format"
-	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/datarhei/joy4/format/rtmp"
 )
 
@@ -22,7 +22,6 @@ func init() {
 
 type channel struct {
 	que      *pubsub.Queue
-	metadata flvio.AMFMap
 	hasAudio bool
 	hasVideo bool
 }
@@ -65,7 +64,7 @@ func New(config Config) (Server, error) {
 		Addr:                config.Addr,
 		MaxProbePacketCount: 40,
 		DebugChunks: func(_ net.Conn) bool {
-			return false
+			return true
 		},
 		ConnectionIdleTimeout: 10 * time.Second,
 	}
@@ -122,8 +121,6 @@ func (s *server) handlePlay(conn *rtmp.Conn) {
 	s.lock.RUnlock()
 
 	if ch != nil {
-		//conn.SetMetaData(ch.metadata)
-
 		s.log("PLAY", "START", conn.URL.Path, "", client)
 		cursor := ch.que.Oldest()
 
@@ -140,8 +137,8 @@ func (s *server) handlePlay(conn *rtmp.Conn) {
 			Demuxer: cursor,
 		}
 
-		avutil.CopyFile(conn, demuxer)
-		s.log("PLAY", "STOP", conn.URL.Path, "", client)
+		err := avutil.CopyFile(conn, demuxer)
+		s.log("PLAY", "STOP", conn.URL.Path, err.Error(), client)
 	} else {
 		s.log("PLAY", "NOTFOUND", conn.URL.Path, "", client)
 	}
@@ -232,12 +229,16 @@ func main() {
 	var cert string
 	var key string
 
-	flag.StringVar(&addr, "addr", "", "Address to listen on")
+	flag.StringVar(&addr, "addr", ":1935", "Address to listen on")
 	flag.StringVar(&cert, "cert", "", "Path to the certifacate file")
 	flag.StringVar(&key, "key", "", "Path to the key file")
-	//flag.BoolVar(&help, "h", false, "Show options")
 
 	flag.Parse()
+
+	if len(addr) == 0 {
+		fmt.Printf("invalid address\n")
+		os.Exit(1)
+	}
 
 	config := Config{
 		Addr: addr,
