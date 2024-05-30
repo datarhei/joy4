@@ -421,6 +421,14 @@ func (conn *Conn) NetConn() net.Conn {
 	return conn.netconn.Conn
 }
 
+func (conn *Conn) LocalAddr() net.Addr {
+	return conn.netconn.LocalAddr()
+}
+
+func (conn *Conn) RemoteAddr() net.Addr {
+	return conn.netconn.RemoteAddr()
+}
+
 func (conn *Conn) SetReadIdleTimeout(d time.Duration) error {
 	return conn.netconn.SetReadIdleTimeout(d)
 }
