@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"time"
 
@@ -22,7 +23,12 @@ func main() {
 		log.Fatalf("%s [url]", os.Args[0])
 	}
 
-	src, err := rtmp.Dial(os.Args[1])
+	src, err := rtmp.Dial(os.Args[1], rtmp.DialOptions{
+		MaxProbePacketCount: 10,
+		DebugChunks: func(conn net.Conn) bool {
+			return true
+		},
+	})
 	if err != nil {
 		log.Fatalf("error connecting: %s", err.Error())
 	}
