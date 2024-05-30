@@ -1718,8 +1718,8 @@ func (conn *Conn) readChunk() (err error) {
 				if cs.sametscount > 10 {
 					if cs.msgcount < 20 { // only consider the first video and audio messages
 						cs.genwallclocktime = true
-					} else {
-						err = fmt.Errorf("detected sequence of non-changing timestamps: %d", cs.timenow)
+					} else { // otherwise bail out
+						err = fmt.Errorf("detected sequence of non-changing timestamps: %d (msgtypeid %d)", cs.timenow, cs.msgtypeid)
 						return
 					}
 				}
