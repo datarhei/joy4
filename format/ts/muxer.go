@@ -2,12 +2,14 @@ package ts
 
 import (
 	"fmt"
+	"io"
+	"log"
+	"time"
+
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/format/ts/tsio"
-	"io"
-	"time"
 )
 
 var CodecTypes = []av.CodecType{av.H264, av.AAC}
@@ -25,20 +27,47 @@ type Muxer struct {
 	nalus   [][]byte
 
 	tswpat, tswpmt *tsio.TSWriter
+
+	// Add counters for periodic PAT/PMT sending
+	patpmtCounter int
+	lastPATPMT    time.Time
+
+	// Separate counters for PAT and PMT
+	patCounter uint
+	pmtCounter uint
+
+	// Counter for relative time
+	startTime   time.Time
+	packetCount uint64
+
+	// For tracking PCR generation
+	pcrPID      uint16
+	lastPCRTime time.Duration
+
+	// For tracking timestamps
+	lastVideoTime time.Duration
+	lastAudioTime time.Duration
 }
 
 func NewMuxer(w io.Writer) *Muxer {
-	return &Muxer{
-		w:       w,
-		psidata: make([]byte, 188),
-		peshdr:  make([]byte, tsio.MaxPESHeaderLength),
-		tshdr:   make([]byte, tsio.MaxTSHeaderLength),
-		adtshdr: make([]byte, aacparser.ADTSHeaderLength),
-		nalus:   make([][]byte, 16),
-		datav:   make([][]byte, 16),
-		tswpmt:  tsio.NewTSWriter(tsio.PMT_PID),
-		tswpat:  tsio.NewTSWriter(tsio.PAT_PID),
+	muxer := &Muxer{
+		w:          w,
+		psidata:    make([]byte, 188),
+		peshdr:     make([]byte, tsio.MaxPESHeaderLength),
+		tshdr:      make([]byte, tsio.MaxTSHeaderLength),
+		adtshdr:    make([]byte, aacparser.ADTSHeaderLength),
+		nalus:      make([][]byte, 16),
+		datav:      make([][]byte, 16),
+		tswpmt:     tsio.NewTSWriter(tsio.PMT_PID),
+		tswpat:     tsio.NewTSWriter(tsio.PAT_PID),
+		lastPATPMT: time.Now(),
 	}
+
+	// Return separate counters for PAT/PMT
+	muxer.tswpat.SetGlobalCounter(&muxer.patCounter)
+	muxer.tswpmt.SetGlobalCounter(&muxer.pmtCounter)
+
+	return muxer
 }
 
 func (self *Muxer) newStream(codec av.CodecData) (err error) {
@@ -135,6 +164,7 @@ func (self *Muxer) WritePATPMT() (err error) {
 		return
 	}
 
+	self.lastPATPMT = time.Now()
 	return
 }
 
@@ -146,6 +176,11 @@ func (self *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 		}
 	}
 
+	// Set the PCR PID to the first stream's PID (usually video)
+	if len(self.streams) > 0 {
+		self.pcrPID = self.streams[0].pid
+	}
+
 	if err = self.WritePATPMT(); err != nil {
 		return
 	}
@@ -153,8 +188,54 @@ func (self *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 }
 
 func (self *Muxer) WritePacket(pkt av.Packet) (err error) {
+	// Initialize startTime on the first packet
+	if self.startTime.IsZero() {
+		self.startTime = time.Now()
+	}
+
+	// Periodically send PAT/PMT
+	if time.Since(self.lastPATPMT) > 1*time.Second {
+		if err = self.WritePATPMT(); err != nil {
+			return
+		}
+	}
+
 	stream := self.streams[pkt.Idx]
-	pkt.Time += time.Second
+
+	// Correct PCR generation logic.
+	// The PCR should be derived from the actual stream timestamps and sent periodically.
+	var pcrTime time.Duration
+	if stream.pid == self.pcrPID {
+		// MPEG-TS spec suggests PCR interval should be <= 100ms. We use 80ms.
+		if self.lastPCRTime == 0 || (pkt.Time-self.lastPCRTime) > 80*time.Millisecond {
+			pcrTime = pkt.Time
+			self.lastPCRTime = pkt.Time
+		}
+	}
+
+	// Diagnostics for timestamp gaps
+	if stream.Type() == av.H264 {
+		// Check interval between video frames
+		if self.lastVideoTime > 0 {
+			timeDiff := pkt.Time - self.lastVideoTime
+			if timeDiff > time.Second {
+				log.Printf("WARNING: Large video time gap: %v between frames", timeDiff)
+			}
+		}
+		self.lastVideoTime = pkt.Time
+	} else if stream.Type() == av.AAC {
+		// Check interval between audio packets
+		if self.lastAudioTime > 0 {
+			timeDiff := pkt.Time - self.lastAudioTime
+			if timeDiff > time.Second {
+				log.Printf("WARNING: Large audio time gap: %v between packets", timeDiff)
+			}
+		}
+		self.lastAudioTime = pkt.Time
+	}
+
+	// Use original timestamps without complex conversion
+	originalTime := pkt.Time
 
 	switch stream.Type() {
 	case av.AAC:
@@ -166,7 +247,8 @@ func (self *Muxer) WritePacket(pkt av.Packet) (err error) {
 		self.datav[1] = self.adtshdr
 		self.datav[2] = pkt.Data
 
-		if err = stream.tsw.WritePackets(self.w, self.datav[:3], pkt.Time, true, false); err != nil {
+		// Do not send PCR with audio packets. It's handled by the video stream.
+		if err = stream.tsw.WritePackets(self.w, self.datav[:3], 0, true, false); err != nil {
 			return
 		}
 
@@ -196,10 +278,16 @@ func (self *Muxer) WritePacket(pkt av.Packet) (err error) {
 		n := tsio.FillPESHeader(self.peshdr, tsio.StreamIdH264, -1, pkt.Time+pkt.CompositionTime, pkt.Time)
 		datav[0] = self.peshdr[:n]
 
-		if err = stream.tsw.WritePackets(self.w, datav, pkt.Time, pkt.IsKeyFrame, false); err != nil {
+		// Pass the correctly calculated pcrTime. It will be non-zero only when needed.
+		if err = stream.tsw.WritePackets(self.w, datav, pcrTime, pkt.IsKeyFrame, false); err != nil {
 			return
 		}
 	}
 
+	// Increment packet count
+	self.packetCount++
+
+	// Restore original time for correctness
+	pkt.Time = originalTime
 	return
 }

@@ -2,9 +2,10 @@ package tsio
 
 import (
 	"fmt"
-	"github.com/datarhei/joy4/utils/bits/pio"
 	"io"
 	"time"
+
+	"github.com/datarhei/joy4/utils/bits/pio"
 )
 
 const (
@@ -374,6 +375,10 @@ func FillPSI(h []byte, tableid uint8, tableext uint16, datalen int) (n int) {
 
 func TimeToPCR(tm time.Duration) (pcr uint64) {
 	// base(33)+resverd(6)+ext(9)
+	// Добавляем wraparound для предотвращения переполнения
+	if tm > 26*time.Hour {
+		tm = tm % (26*time.Hour + 30*time.Minute)
+	}
 	ts := uint64(tm * PCR_HZ / time.Second)
 	base := ts / 300
 	ext := ts % 300
@@ -390,6 +395,10 @@ func PCRToTime(pcr uint64) (tm time.Duration) {
 }
 
 func TimeToTs(tm time.Duration) (v uint64) {
+	// Добавляем wraparound для PTS (каждые 26.5 часов)
+	if tm > 26*time.Hour {
+		tm = tm % (26*time.Hour + 30*time.Minute)
+	}
 	ts := uint64(tm * PTS_HZ / time.Second)
 	// 0010	PTS 32..30 1	PTS 29..15 1 PTS 14..00 1
 	v = ((ts>>30)&0x7)<<33 | ((ts>>15)&0x7fff)<<17 | (ts&0x7fff)<<1 | 0x100010001
@@ -501,6 +510,8 @@ type TSWriter struct {
 	w                 io.Writer
 	ContinuityCounter uint
 	tshdr             []byte
+	// Глобальный счетчик continuity для синхронизации
+	globalCounter *uint
 }
 
 func NewTSWriter(pid uint16) *TSWriter {
@@ -514,6 +525,11 @@ func NewTSWriter(pid uint16) *TSWriter {
 	return w
 }
 
+// Метод для установки глобального счетчика
+func (self *TSWriter) SetGlobalCounter(counter *uint) {
+	self.globalCounter = counter
+}
+
 func (self *TSWriter) WritePackets(w io.Writer, datav [][]byte, pcr time.Duration, sync bool, paddata bool) (err error) {
 	datavlen := pio.VecLen(datav)
 	writev := make([][]byte, len(datav))
@@ -521,17 +537,31 @@ func (self *TSWriter) WritePackets(w io.Writer, datav [][]byte, pcr time.Duratio
 
 	for writepos < datavlen {
 		self.tshdr[1] = self.tshdr[1] & 0x1f
-		self.tshdr[3] = byte(self.ContinuityCounter)&0xf | 0x30
+
+		// Используем синхронизированный счетчик для PAT/PMT
+		if self.globalCounter != nil {
+			self.tshdr[3] = byte(*self.globalCounter)&0xf | 0x30
+			*self.globalCounter++
+		} else {
+			self.tshdr[3] = byte(self.ContinuityCounter)&0xf | 0x30
+			self.ContinuityCounter++
+		}
+
 		self.tshdr[5] = 0 // flags
 		hdrlen := 6
-		self.ContinuityCounter++
 
 		if writepos == 0 {
 			self.tshdr[1] = 0x40 | self.tshdr[1] // Payload Unit Start Indicator
 			if pcr != 0 {
 				hdrlen += 6
 				self.tshdr[5] = 0x10 | self.tshdr[5] // PCR flag (Discontinuity indicator 0x80)
-				pio.PutU48BE(self.tshdr[6:12], TimeToPCR(pcr))
+				// Исправляем обработку PCR - добавляем wraparound для длинных стримов
+				pcrValue := pcr
+				if pcr > 26*time.Hour {
+					// Wraparound для PCR каждые 26.5 часов
+					pcrValue = pcr % (26*time.Hour + 30*time.Minute)
+				}
+				pio.PutU48BE(self.tshdr[6:12], TimeToPCR(pcrValue))
 			}
 			if sync {
 				self.tshdr[5] = 0x40 | self.tshdr[5] // Random Access indicator
