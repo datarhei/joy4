@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/datarhei/joy4/utils/bits/pio"
 	"github.com/stretchr/testify/require"
@@ -1845,4 +1847,119 @@ func TestConcurrentReadWrite(t *testing.T) {
 
 	require.Equal(t, count, videos)
 	require.Equal(t, count, len(responses))
+}
+
+// publishServer accepts one client and runs the server side of a publishing client in f.
+func publishServer(t *testing.T, f func(s *Conn) error) (string, chan error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+
+	result := make(chan error, 1)
+
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			result <- err
+			return
+		}
+		defer c.Close()
+
+		s := NewConn(c)
+		s.isserver = true
+		if err := s.prepare(stageCommandDone, 0); err != nil {
+			result <- err
+			return
+		}
+
+		result <- f(s)
+	}()
+
+	return "rtmp://" + ln.Addr().String() + "/live/test", result
+}
+
+// publishUntilError publishes AAC packets until WritePacket returns an error, at most for the timeout.
+func publishUntilError(t *testing.T, url string, timeout time.Duration) error {
+	conn, err := Dial(url, DialOptions{})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	stream, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+
+	err = conn.WriteHeader([]av.CodecData{stream})
+	require.NoError(t, err)
+
+	start := time.Now()
+	for i := 0; time.Since(start) < timeout; i++ {
+		if err := conn.WritePacket(av.Packet{Idx: 0, Data: []byte{byte(i)}, Time: int64(23 * i)}); err != nil {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	return nil
+}
+
+func TestClientPublishReadLoop(t *testing.T) {
+	url, result := publishServer(t, func(s *Conn) error {
+		for i := 0; i < 3; i++ {
+			if _, err := s.ReadPacket(); err != nil {
+				return err
+			}
+		}
+
+		// > ping request
+		ping := chunkMessage(2, 0, msgtypeidUserControl, 0, []byte{0x00, eventtypePingRequest, 0x00, 0x00, 0x30, 0x39}, 128)
+		s.wlock.Lock()
+		s.bufw.Write(ping)
+		s.bufw.Flush()
+		s.wlock.Unlock()
+
+		// < ping response
+		for {
+			if err := s.pollMsg(); err != nil {
+				return err
+			}
+			if s.msgtypeid == msgtypeidUserControl && s.eventtype == eventtypePingResponse {
+				if ts := pio.U32BE(s.msgdata[2:]); ts != 0x3039 {
+					return fmt.Errorf("wrong ping response: %#x", ts)
+				}
+				break
+			}
+		}
+
+		// > onStatus(error)
+		if err := s.writeCommandMsg(false, 5, s.avmsgsid, "onStatus", 0, nil,
+			flvio.AMFMap{"level": "error", "code": "NetStream.Publish.Failed", "description": "stop"}); err != nil {
+			return err
+		}
+		if err := s.flushWrite(); err != nil {
+			return err
+		}
+
+		// wait until the client is gone
+		for {
+			if err := s.pollMsg(); err != nil {
+				return nil
+			}
+		}
+	})
+
+	err := publishUntilError(t, url, 5*time.Second)
+	require.EqualError(t, err, "publish failed: NetStream.Publish.Failed (stop)")
+
+	require.NoError(t, <-result)
+}
+
+func TestClientPublishServerCloses(t *testing.T) {
+	url, result := publishServer(t, func(s *Conn) error {
+		_, err := s.ReadPacket()
+		return err
+	})
+
+	err := publishUntilError(t, url, 5*time.Second)
+	require.Error(t, err)
+
+	require.NoError(t, <-result)
 }

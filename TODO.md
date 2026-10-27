@@ -37,7 +37,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 24. [x] **Commands are ignored after setup.** Once the stream is publishing or playing, commands are dropped (`pollAVTag`). `deleteStream` / `FCUnpublish` from a publisher don't end the stream; only TCP EOF does. In server play mode nobody reads from the socket, so pause, seek and closeStream from players are never seen.
     - [ ] During playback nobody reads from the socket of the player, so closeStream, deleteStream, pause, acks and ping responses of players are never seen. Needs a read loop alongside WritePacket, see #43.
 25. [x] **Client does not handle errors.** `_error` replies to connect or createStream are ignored, so it loops until the peer closes. Transaction ids are not matched. The client doesn't wait for `NetStream.Publish.Start` or `Play.Start`, and it never surfaces `onStatus` errors (BadName, StreamNotFound, UnpublishNotify).
-26. [ ] **Client publishing never reads.** Server pings are never answered and server acks and onStatus messages pile up. Some servers drop clients that don't answer pings.
+26. [x] **Client publishing never reads.** Server pings are never answered and server acks and onStatus messages pile up. Some servers drop clients that don't answer pings.
 27. [ ] **Client details.** It sends SetPeerBandwidth (normally server-to-client only). SetBufferLength goes to msgsid 0 before the stream exists, so it has no effect. `publish` has no `"live"` argument, and `releaseStream`/`FCPublish` are not sent, which some CDNs require.
 28. [ ] **No RTMPS on the client side.** `Dial` is TCP only, and `ParseURL` always defaults to port 1935, with no `rtmps://` or port 443 handling. The server does have TLS.
 
@@ -70,6 +70,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
    - `writeAVTag` gives csid 0 to non-A/V tags.
    - `SplitPath` puts everything after the first segment into the stream name (`app/instance` ambiguity).
    - There are no unit tests in `format/rtmp`.
+48. [ ] **Publishing client doesn't end the stream on Close.** `Conn.Close` of a publishing client only closes the TCP connection, without sending `FCUnpublish` and `deleteStream` first as FFmpeg and OBS do. A receiver sees a broken connection instead of the end of the stream (FFmpeg reports "Error during demuxing: Input/output error").
 
 ## H. Other packages
 47. [ ] **`pktque.Walltime` never paces packets.** `av/pktque/filters.go`: `ModifyPacket` sets the start time only if `firsttime == math.MinInt64`, but the zero value of `firsttime` is 0, so the start time is never set and the filter never sleeps. A publisher using it (e.g. `examples/rtmp_publish`) sends a whole file at once instead of in real time. It also uses `time.Now().Unix() * 1000`, which has only second resolution.

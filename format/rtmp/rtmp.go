@@ -317,6 +317,10 @@ type Conn struct {
 	reading, writing    bool
 	stage               int
 
+	// the error of the read loop of a publishing client
+	readLoopLock sync.Mutex
+	readLoopErr  error
+
 	avmsgsid uint32
 
 	gotcommand     bool
@@ -354,13 +358,15 @@ type Conn struct {
 
 type idleConn struct {
 	net.Conn
+
+	// lock guards the timeouts and the deadline, as they can be changed while reading or writing
+	lock             sync.Mutex
 	ReadIdleTimeout  time.Duration
 	WriteIdleTimeout time.Duration
-
-	setupDeadline time.Time
+	setupDeadline    time.Time
 }
 
-// deadline returns the deadline for the given idle timeout, limited by the setup deadline.
+// deadline returns the deadline for the given idle timeout, limited by the setup deadline. The lock must be held.
 func (t *idleConn) deadline(idle time.Duration) time.Time {
 	deadline := time.Time{}
 	if idle > 0 {
@@ -375,30 +381,40 @@ func (t *idleConn) deadline(idle time.Duration) time.Time {
 }
 
 func (t *idleConn) Read(p []byte) (int, error) {
+	t.lock.Lock()
 	if t.ReadIdleTimeout > 0 || !t.setupDeadline.IsZero() {
 		t.Conn.SetReadDeadline(t.deadline(t.ReadIdleTimeout))
 	}
+	t.lock.Unlock()
 
 	n, err := t.Conn.Read(p)
 	return n, err
 }
 
 func (t *idleConn) Write(p []byte) (int, error) {
+	t.lock.Lock()
 	if t.WriteIdleTimeout > 0 || !t.setupDeadline.IsZero() {
 		t.Conn.SetWriteDeadline(t.deadline(t.WriteIdleTimeout))
 	}
+	t.lock.Unlock()
 
 	n, err := t.Conn.Write(p)
 	return n, err
 }
 
 func (t *idleConn) SetReadIdleTimeout(d time.Duration) error {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
 	t.ReadIdleTimeout = d
 
 	return t.Conn.SetReadDeadline(t.deadline(d))
 }
 
 func (t *idleConn) SetWriteIdleTimeout(d time.Duration) error {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
 	t.WriteIdleTimeout = d
 
 	return t.Conn.SetWriteDeadline(t.deadline(d))
@@ -407,6 +423,9 @@ func (t *idleConn) SetWriteIdleTimeout(d time.Duration) error {
 // SetSetupDeadline sets an absolute deadline for reading and writing in addition to
 // the idle timeouts. A zero value removes the deadline.
 func (t *idleConn) SetSetupDeadline(deadline time.Time) error {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
 	t.setupDeadline = deadline
 
 	if err := t.Conn.SetReadDeadline(t.deadline(t.ReadIdleTimeout)); err != nil {
@@ -1351,6 +1370,10 @@ func (conn *Conn) WritePacket(pkt av.Packet) (err error) {
 		return
 	}
 
+	if err = conn.readLoopError(); err != nil {
+		return
+	}
+
 	stream := conn.streams[pkt.Idx]
 	tag, timestamp := flv.PacketToTag(pkt, stream)
 
@@ -1423,7 +1446,49 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 
 	conn.streams = streams
 	conn.stage++
+
+	if !conn.isserver {
+		// the server is not required to send anything while the client publishes
+		conn.netconn.SetReadIdleTimeout(0)
+		go conn.readLoop()
+	}
+
 	return
+}
+
+// readLoop reads the messages of the server while the client publishes, such that pings are answered and
+// acks are sent. A read error or an error status of the server is returned by the next WritePacket.
+func (conn *Conn) readLoop() {
+	for {
+		if err := conn.pollMsg(); err != nil {
+			conn.setReadLoopError(err)
+			return
+		}
+
+		if conn.gotcommand && conn.commandname == "onStatus" {
+			info := conn.statusInfo()
+			if level, _ := info["level"].(string); level == "error" {
+				conn.setReadLoopError(fmt.Errorf("publish failed: %s", statusDescription(info)))
+				return
+			}
+		}
+	}
+}
+
+func (conn *Conn) setReadLoopError(err error) {
+	conn.readLoopLock.Lock()
+	defer conn.readLoopLock.Unlock()
+
+	if conn.readLoopErr == nil {
+		conn.readLoopErr = err
+	}
+}
+
+func (conn *Conn) readLoopError() error {
+	conn.readLoopLock.Lock()
+	defer conn.readLoopLock.Unlock()
+
+	return conn.readLoopErr
 }
 
 func (conn *Conn) tmpwbuf(n int) []byte {
