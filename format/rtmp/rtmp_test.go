@@ -3,8 +3,11 @@ package rtmp
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"net"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/datarhei/joy4/utils/bits/pio"
 	"github.com/stretchr/testify/require"
@@ -140,4 +143,102 @@ func TestSetChunkSizeApplied(t *testing.T) {
 	err = conn.pollMsg()
 	require.NoError(t, err)
 	require.Equal(t, payload, conn.msgdata)
+}
+
+func TestServerSetupTimeout(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c2.Close()
+
+	server := &Server{
+		SetupTimeout: 100 * time.Millisecond,
+	}
+
+	start := time.Now()
+
+	// the client never sends the handshake
+	err := server.HandleNetConn(c1)
+	require.True(t, errors.Is(err, os.ErrDeadlineExceeded), "%v", err)
+	require.Less(t, time.Since(start), 2*time.Second)
+}
+
+func TestClientSetupTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	// the server accepts the connection but never answers
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		time.Sleep(time.Second)
+	}()
+
+	conn, err := Dial("rtmp://"+ln.Addr().String()+"/live/test", DialOptions{
+		SetupTimeout: 100 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	start := time.Now()
+
+	err = conn.Prepare()
+	require.True(t, errors.Is(err, os.ErrDeadlineExceeded), "%v", err)
+	require.Less(t, time.Since(start), 2*time.Second)
+}
+
+func TestSetupTimeoutRemovedAfterSetup(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	setupTimeout := 100 * time.Millisecond
+
+	server := &Server{
+		SetupTimeout: setupTimeout,
+	}
+
+	result := make(chan error, 1)
+
+	server.HandlePublish = func(conn *Conn) {
+		// wait longer than the setup timeout before reading
+		time.Sleep(3 * setupTimeout)
+		result <- conn.pollMsg()
+	}
+
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			result <- err
+			return
+		}
+		server.HandleNetConn(c)
+	}()
+
+	conn, err := Dial("rtmp://"+ln.Addr().String()+"/live/test", DialOptions{
+		SetupTimeout: setupTimeout,
+	})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	err = conn.Prepare()
+	require.NoError(t, err)
+	require.True(t, conn.publishing)
+
+	// the client waits longer than the setup timeout before writing
+	time.Sleep(3 * setupTimeout)
+
+	err = conn.writeSetChunkSize(4096, false)
+	require.NoError(t, err)
+	err = conn.flushWrite()
+	require.NoError(t, err)
+
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "timeout waiting for the server")
+	}
 }

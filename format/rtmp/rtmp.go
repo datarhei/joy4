@@ -35,9 +35,17 @@ func ParseURL(uri string) (u *url.URL, err error) {
 	return
 }
 
+// DefaultSetupTimeout is the default time for the handshake and the connect, publish or play
+// commands until a connection must be ready for publishing or playing.
+const DefaultSetupTimeout = 10 * time.Second
+
 type DialOptions struct {
 	MaxProbePacketCount int
 	DebugChunks         func(conn net.Conn) bool
+
+	// SetupTimeout is the max. time for the setup of the connection (handshake and commands).
+	// 0 is DefaultSetupTimeout, a negative value disables the timeout.
+	SetupTimeout time.Duration
 }
 
 func Dial(uri string, options DialOptions) (conn *Conn, err error) {
@@ -62,6 +70,9 @@ func DialTimeout(uri string, timeout time.Duration, options DialOptions) (conn *
 	if options.DebugChunks != nil {
 		conn.debugChunks = options.DebugChunks(netconn)
 	}
+	if options.SetupTimeout != 0 {
+		conn.setupTimeout = options.SetupTimeout
+	}
 
 	return
 }
@@ -80,6 +91,10 @@ type Server struct {
 	DebugChunks           func(conn net.Conn) bool
 	ConnectionIdleTimeout time.Duration
 
+	// SetupTimeout is the max. time for the setup of a connection (handshake and commands).
+	// 0 is DefaultSetupTimeout, a negative value disables the timeout.
+	SetupTimeout time.Duration
+
 	listener net.Listener
 	doneChan chan struct{}
 }
@@ -92,6 +107,9 @@ func (s *Server) HandleNetConn(netconn net.Conn) (err error) {
 		conn.debugChunks = s.DebugChunks(netconn)
 	}
 	conn.netconn.SetIdleTimeout(s.ConnectionIdleTimeout)
+	if s.SetupTimeout != 0 {
+		conn.setupTimeout = s.SetupTimeout
+	}
 	conn.isserver = true
 
 	err = s.handleConn(conn)
@@ -285,6 +303,8 @@ type Conn struct {
 
 	start time.Time
 
+	setupTimeout time.Duration
+
 	skipInvalidMessages bool
 
 	debugChunks bool
@@ -294,11 +314,27 @@ type idleConn struct {
 	net.Conn
 	ReadIdleTimeout  time.Duration
 	WriteIdleTimeout time.Duration
+
+	setupDeadline time.Time
+}
+
+// deadline returns the deadline for the given idle timeout, limited by the setup deadline.
+func (t *idleConn) deadline(idle time.Duration) time.Time {
+	deadline := time.Time{}
+	if idle > 0 {
+		deadline = time.Now().Add(idle)
+	}
+
+	if !t.setupDeadline.IsZero() && (deadline.IsZero() || t.setupDeadline.Before(deadline)) {
+		deadline = t.setupDeadline
+	}
+
+	return deadline
 }
 
 func (t *idleConn) Read(p []byte) (int, error) {
-	if t.ReadIdleTimeout > 0 {
-		t.Conn.SetReadDeadline(time.Now().Add(t.ReadIdleTimeout))
+	if t.ReadIdleTimeout > 0 || !t.setupDeadline.IsZero() {
+		t.Conn.SetReadDeadline(t.deadline(t.ReadIdleTimeout))
 	}
 
 	n, err := t.Conn.Read(p)
@@ -306,8 +342,8 @@ func (t *idleConn) Read(p []byte) (int, error) {
 }
 
 func (t *idleConn) Write(p []byte) (int, error) {
-	if t.WriteIdleTimeout > 0 {
-		t.Conn.SetWriteDeadline(time.Now().Add(t.WriteIdleTimeout))
+	if t.WriteIdleTimeout > 0 || !t.setupDeadline.IsZero() {
+		t.Conn.SetWriteDeadline(t.deadline(t.WriteIdleTimeout))
 	}
 
 	n, err := t.Conn.Write(p)
@@ -317,23 +353,25 @@ func (t *idleConn) Write(p []byte) (int, error) {
 func (t *idleConn) SetReadIdleTimeout(d time.Duration) error {
 	t.ReadIdleTimeout = d
 
-	deadline := time.Time{}
-	if t.ReadIdleTimeout > 0 {
-		deadline = time.Now().Add(d)
-	}
-
-	return t.Conn.SetReadDeadline(deadline)
+	return t.Conn.SetReadDeadline(t.deadline(d))
 }
 
 func (t *idleConn) SetWriteIdleTimeout(d time.Duration) error {
 	t.WriteIdleTimeout = d
 
-	deadline := time.Time{}
-	if t.WriteIdleTimeout > 0 {
-		deadline = time.Now().Add(d)
+	return t.Conn.SetWriteDeadline(t.deadline(d))
+}
+
+// SetSetupDeadline sets an absolute deadline for reading and writing in addition to
+// the idle timeouts. A zero value removes the deadline.
+func (t *idleConn) SetSetupDeadline(deadline time.Time) error {
+	t.setupDeadline = deadline
+
+	if err := t.Conn.SetReadDeadline(t.deadline(t.ReadIdleTimeout)); err != nil {
+		return err
 	}
 
-	return t.Conn.SetWriteDeadline(deadline)
+	return t.Conn.SetWriteDeadline(t.deadline(t.WriteIdleTimeout))
 }
 
 func (t *idleConn) SetIdleTimeout(d time.Duration) error {
@@ -379,6 +417,7 @@ func NewConn(netconn net.Conn) *Conn {
 	conn.writebuf = make([]byte, 4096)
 	conn.readbuf = make([]byte, 4096)
 	conn.start = time.Now()
+	conn.setupTimeout = DefaultSetupTimeout
 	return conn
 }
 
@@ -1063,6 +1102,11 @@ func (conn *Conn) prepare(stage int, flags int) (err error) {
 	for conn.stage < stage {
 		switch conn.stage {
 		case 0:
+			// the setup starts with the handshake and ends after the commands
+			if conn.setupTimeout > 0 {
+				conn.netconn.SetSetupDeadline(time.Now().Add(conn.setupTimeout))
+			}
+
 			if conn.isserver {
 				if err = conn.handshakeServer(); err != nil {
 					return
@@ -1088,6 +1132,10 @@ func (conn *Conn) prepare(stage int, flags int) (err error) {
 						return
 					}
 				}
+			}
+
+			if err = conn.netconn.SetSetupDeadline(time.Time{}); err != nil {
+				return
 			}
 
 		case stageCommandDone:
