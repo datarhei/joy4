@@ -1290,9 +1290,9 @@ func TestWriteAVTagTimestamp32Bit(t *testing.T) {
 }
 
 // authorizeTest runs a server with the given authorization and a client that publishes or plays the url.
-// It returns the onStatus info object the client received, whether the publish or play handler has been called,
-// and the error of the server.
-func authorizeTest(t *testing.T, authorize func(conn *Conn) error, url string, publish bool) (flvio.AMFMap, bool, error) {
+// It returns the error of the client, whether the publish or play handler has been called, and the error
+// of the server.
+func authorizeTest(t *testing.T, authorize func(conn *Conn) error, url string, publish bool) (error, bool, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer ln.Close()
@@ -1324,26 +1324,15 @@ func authorizeTest(t *testing.T, authorize func(conn *Conn) error, url string, p
 	if !publish {
 		flags = prepareReading
 	}
-	err = conn.prepare(stageCommandDone, flags)
-	require.NoError(t, err)
-
-	// wait for the onStatus of the publish or play command
-	var info flvio.AMFMap
-	for info == nil {
-		err = conn.pollMsg()
-		require.NoError(t, err)
-		if conn.gotcommand && conn.commandname == "onStatus" && len(conn.commandparams) > 0 {
-			info, _ = conn.commandparams[0].(flvio.AMFMap)
-		}
-	}
+	clienterr := conn.prepare(stageCommandDone, flags)
 
 	err = <-result
 
 	select {
 	case <-handled:
-		return info, true, err
+		return clienterr, true, err
 	default:
-		return info, false, err
+		return clienterr, false, err
 	}
 }
 
@@ -1361,18 +1350,15 @@ func TestAuthorizePublish(t *testing.T) {
 		return nil
 	}
 
-	info, handled, err := authorizeTest(t, authorize, "/live/test?token=secret", true)
+	clienterr, handled, err := authorizeTest(t, authorize, "/live/test?token=secret", true)
+	require.NoError(t, clienterr)
 	require.NoError(t, err)
 	require.True(t, handled)
-	require.Equal(t, "status", info["level"])
-	require.Equal(t, "NetStream.Publish.Start", info["code"])
 
-	info, handled, err = authorizeTest(t, authorize, "/live/test?token=wrong", true)
+	clienterr, handled, err = authorizeTest(t, authorize, "/live/test?token=wrong", true)
+	require.EqualError(t, clienterr, "command publish failed: NetStream.Publish.BadName (invalid token)")
 	require.ErrorContains(t, err, "publish not authorized: invalid token")
 	require.False(t, handled)
-	require.Equal(t, "error", info["level"])
-	require.Equal(t, "NetStream.Publish.BadName", info["code"])
-	require.Equal(t, "invalid token", info["description"])
 }
 
 func TestAuthorizePlay(t *testing.T) {
@@ -1389,18 +1375,15 @@ func TestAuthorizePlay(t *testing.T) {
 		return nil
 	}
 
-	info, handled, err := authorizeTest(t, authorize, "/live/test?token=secret", false)
+	clienterr, handled, err := authorizeTest(t, authorize, "/live/test?token=secret", false)
+	require.NoError(t, clienterr)
 	require.NoError(t, err)
 	require.True(t, handled)
-	require.Equal(t, "status", info["level"])
-	require.Equal(t, "NetStream.Play.Start", info["code"])
 
-	info, handled, err = authorizeTest(t, authorize, "/live/test?token=wrong", false)
+	clienterr, handled, err = authorizeTest(t, authorize, "/live/test?token=wrong", false)
+	require.EqualError(t, clienterr, "command play failed: NetStream.Play.StreamNotFound (invalid token)")
 	require.ErrorContains(t, err, "play not authorized: invalid token")
 	require.False(t, handled)
-	require.Equal(t, "error", info["level"])
-	require.Equal(t, "NetStream.Play.StreamNotFound", info["code"])
-	require.Equal(t, "invalid token", info["description"])
 }
 
 // commandMessage returns an AMF0 command message on chunk stream 3.
@@ -1625,4 +1608,162 @@ func TestPublisherEndsStreamTCP(t *testing.T) {
 
 	_, err := conn.ReadPacket()
 	require.ErrorIs(t, err, io.EOF)
+}
+
+// newScriptedClient returns a client connection after the handshake that reads the given server messages.
+func newScriptedClient(t *testing.T, data []byte) *Conn {
+	conn := newReadConn(data)
+	conn.stage = stageHandshakeDone
+	u, err := ParseURL("rtmp://localhost/live/test")
+	require.NoError(t, err)
+	conn.URL = u
+	return conn
+}
+
+func statusMessage(name string, transid float64, level, code, description string) []byte {
+	return commandMessage(name, transid, nil, flvio.AMFMap{"level": level, "code": code, "description": description})
+}
+
+var (
+	connectResult      = commandMessage("_result", 1.0, flvio.AMFMap{"fmsVer": "FMS/3,0,1,123"}, flvio.AMFMap{"level": "status", "code": "NetConnection.Connect.Success"})
+	createStreamResult = commandMessage("_result", 2.0, nil, 1.0)
+)
+
+func concat(parts ...[]byte) []byte {
+	data := []byte{}
+	for _, p := range parts {
+		data = append(data, p...)
+	}
+	return data
+}
+
+func TestClientCommandErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		publish bool
+		data    []byte
+		err     string
+	}{
+		{"connect _error", true, concat(
+			statusMessage("_error", 1.0, "error", "NetConnection.Connect.Rejected", "not allowed"),
+		), "command connect failed: NetConnection.Connect.Rejected (not allowed)"},
+		{"createStream _error", true, concat(
+			connectResult,
+			statusMessage("_error", 2.0, "error", "NetConnection.Call.Failed", ""),
+		), "command createStream failed: NetConnection.Call.Failed"},
+		{"publish rejected", true, concat(
+			connectResult, createStreamResult,
+			statusMessage("onStatus", 0, "error", "NetStream.Publish.BadName", "invalid token"),
+		), "command publish failed: NetStream.Publish.BadName (invalid token)"},
+		{"publish _error", true, concat(
+			connectResult, createStreamResult,
+			statusMessage("_error", 3.0, "error", "NetConnection.Call.Failed", "no publish"),
+		), "command publish failed: NetConnection.Call.Failed (no publish)"},
+		{"play not found", false, concat(
+			connectResult, createStreamResult,
+			statusMessage("onStatus", 0, "status", "NetStream.Play.Reset", ""),
+			statusMessage("onStatus", 0, "error", "NetStream.Play.StreamNotFound", "no stream"),
+		), "command play failed: NetStream.Play.StreamNotFound (no stream)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := newScriptedClient(t, tc.data)
+
+			flags := prepareWriting
+			if !tc.publish {
+				flags = prepareReading
+			}
+
+			err := conn.prepare(stageCommandDone, flags)
+			require.EqualError(t, err, tc.err)
+		})
+	}
+}
+
+func TestClientCommandResults(t *testing.T) {
+	// answers with other transaction ids and other messages are skipped
+	data := concat(
+		commandMessage("onBWDone", 0.0, nil, 8192.0),
+		commandMessage("_result", 7.0, nil),
+		connectResult,
+		commandMessage("_error", 7.0, nil, flvio.AMFMap{"code": "NetConnection.Call.Failed"}),
+		createStreamResult,
+		statusMessage("onStatus", 0, "status", "NetStream.Publish.Start", "Start publishing"),
+	)
+
+	conn := newScriptedClient(t, data)
+
+	err := conn.prepare(stageCommandDone, prepareWriting)
+	require.NoError(t, err)
+	require.True(t, conn.IsPublishing())
+	require.Equal(t, uint32(1), conn.avmsgsid)
+}
+
+// playData returns the answers of a server to a player and an AAC stream with the given number of frames.
+func playData(frames int) []byte {
+	data := concat(
+		connectResult, createStreamResult,
+		statusMessage("onStatus", 0, "status", "NetStream.Play.Reset", ""),
+		statusMessage("onStatus", 0, "status", "NetStream.Play.Start", ""),
+		dataMessage("onMetaData", flvio.AMFMap{"audiocodecid": 10.0}),
+		chunkMessage(4, 0, msgtypeidAudioMsg, 1, []byte{0xAF, 0x00, 0x12, 0x10}, 128),
+	)
+	for i := 0; i < frames; i++ {
+		data = append(data, chunkMessage(4, uint32(23*i), msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, byte(i)}, 128)...)
+	}
+	return data
+}
+
+func TestClientPlayEnds(t *testing.T) {
+	for _, code := range []string{"NetStream.Play.UnpublishNotify", "NetStream.Play.Stop", "NetStream.Play.Complete"} {
+		t.Run(code, func(t *testing.T) {
+			data := playData(3)
+			data = append(data, statusMessage("onStatus", 0, "status", code, "")...)
+			// must not be read anymore
+			data = append(data, chunkMessage(4, 1000, msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, 0xFF}, 128)...)
+
+			conn := newScriptedClient(t, data)
+
+			for i := 0; i < 3; i++ {
+				pkt, err := conn.ReadPacket()
+				require.NoError(t, err, "packet %d", i)
+				require.Equal(t, []byte{byte(i)}, pkt.Data, "packet %d", i)
+			}
+
+			_, err := conn.ReadPacket()
+			require.ErrorIs(t, err, io.EOF)
+
+			_, err = conn.ReadPacket()
+			require.ErrorIs(t, err, io.EOF)
+		})
+	}
+}
+
+func TestClientPlayError(t *testing.T) {
+	data := playData(2)
+	data = append(data, statusMessage("onStatus", 0, "error", "NetStream.Play.Failed", "gone")...)
+
+	conn := newScriptedClient(t, data)
+
+	for i := 0; i < 2; i++ {
+		_, err := conn.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+	}
+
+	_, err := conn.ReadPacket()
+	require.EqualError(t, err, "play failed: NetStream.Play.Failed (gone)")
+}
+
+func TestClientPlayOtherStatus(t *testing.T) {
+	// other status messages during playing are skipped
+	data := playData(1)
+	data = append(data, statusMessage("onStatus", 0, "status", "NetStream.Play.PublishNotify", "")...)
+	data = append(data, chunkMessage(4, 1000, msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, 0x01}, 128)...)
+
+	conn := newScriptedClient(t, data)
+
+	for i := 0; i < 2; i++ {
+		pkt, err := conn.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, []byte{byte(i)}, pkt.Data, "packet %d", i)
+	}
 }

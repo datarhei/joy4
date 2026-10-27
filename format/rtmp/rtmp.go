@@ -306,7 +306,7 @@ type Conn struct {
 
 	isserver            bool
 	publishing, playing bool
-	unpublished         bool // the publisher ended the stream
+	ended               bool // the peer ended the stream
 	reading, writing    bool
 	stage               int
 
@@ -595,7 +595,7 @@ func (conn *Conn) pollCommand() (err error) {
 }
 
 func (conn *Conn) pollAVTag() (tag flvio.Tag, err error) {
-	if conn.unpublished {
+	if conn.ended {
 		err = io.EOF
 		return
 	}
@@ -609,7 +609,22 @@ func (conn *Conn) pollAVTag() (tag flvio.Tag, err error) {
 			switch conn.commandname {
 			case "FCUnpublish", "deleteStream", "closeStream":
 				// the publisher ends the stream
-				conn.unpublished = true
+				conn.ended = true
+				err = io.EOF
+				return
+			}
+		}
+
+		if conn.gotcommand && !conn.isserver && conn.playing && conn.commandname == "onStatus" {
+			info := conn.statusInfo()
+			if level, _ := info["level"].(string); level == "error" {
+				err = fmt.Errorf("play failed: %s", statusDescription(info))
+				return
+			}
+			switch code, _ := info["code"].(string); code {
+			case "NetStream.Play.UnpublishNotify", "NetStream.Play.Stop", "NetStream.Play.Complete":
+				// the server ends the stream
+				conn.ended = true
 				err = io.EOF
 				return
 			}
@@ -1039,37 +1054,87 @@ func (conn *Conn) writeConnect(path string) (err error) {
 		return
 	}
 
+	// < _result("NetConnection.Connect.Success")
+	if err = conn.waitResult("connect", 1); err != nil {
+		return
+	}
+
+	var ok bool
+	var errmsg string
+	if ok, errmsg = conn.checkConnectResult(); !ok {
+		err = fmt.Errorf("command connect failed: %s", errmsg)
+		return
+	}
+	if Debug {
+		fmt.Printf("rtmp: < _result() of connect\n")
+	}
+
+	return
+}
+
+// waitResult waits for the _result or _error of the command with the transaction id. An _error is returned as error.
+func (conn *Conn) waitResult(command string, transid float64) (err error) {
 	for {
 		if err = conn.pollMsg(); err != nil {
 			return
 		}
-		if conn.gotcommand {
-			// < _result("NetConnection.Connect.Success")
-			if conn.commandname == "_result" {
-				var ok bool
-				var errmsg string
-				if ok, errmsg = conn.checkConnectResult(); !ok {
-					err = fmt.Errorf("command connect failed: %s", errmsg)
-					return
-				}
-				if Debug {
-					fmt.Printf("rtmp: < _result() of connect\n")
-				}
-				break
+		if !conn.gotcommand || conn.commandtransid != transid {
+			continue
+		}
+		switch conn.commandname {
+		case "_result":
+			return nil
+		case "_error":
+			return fmt.Errorf("command %s failed: %s", command, statusDescription(conn.statusInfo()))
+		}
+	}
+}
+
+// waitStatus waits for an onStatus with the code after the command with the transaction id. An onStatus
+// with the level error, or an _error of the command, is returned as error.
+func (conn *Conn) waitStatus(command string, transid float64, code string) (err error) {
+	for {
+		if err = conn.pollMsg(); err != nil {
+			return
+		}
+		if !conn.gotcommand {
+			continue
+		}
+		switch conn.commandname {
+		case "_error":
+			if transid != 0 && conn.commandtransid == transid {
+				return fmt.Errorf("command %s failed: %s", command, statusDescription(conn.statusInfo()))
 			}
-		} else {
-			if conn.msgtypeid == msgtypeidWindowAckSize {
-				if len(conn.msgdata) == 4 {
-					conn.readAckSize = pio.U32BE(conn.msgdata) >> 1
-				}
-				//if err = self.writeWindowAckSize(0xffffffff); err != nil {
-				//	return
-				//}
+		case "onStatus":
+			info := conn.statusInfo()
+			if level, _ := info["level"].(string); level == "error" {
+				return fmt.Errorf("command %s failed: %s", command, statusDescription(info))
+			}
+			if c, _ := info["code"].(string); c == code {
+				return nil
 			}
 		}
 	}
+}
 
-	return
+// statusInfo returns the info object of an onStatus, _result or _error command.
+func (conn *Conn) statusInfo() flvio.AMFMap {
+	for _, param := range conn.commandparams {
+		if info, ok := param.(flvio.AMFMap); ok {
+			return info
+		}
+	}
+	return flvio.AMFMap{}
+}
+
+// statusDescription returns the code and the description of an info object.
+func statusDescription(info flvio.AMFMap) string {
+	code, _ := info["code"].(string)
+	description, _ := info["description"].(string)
+	if len(description) == 0 {
+		return code
+	}
+	return code + " (" + description + ")"
 }
 
 func (conn *Conn) connectPublish() (err error) {
@@ -1094,21 +1159,15 @@ func (conn *Conn) connectPublish() (err error) {
 		return
 	}
 
-	for {
-		if err = conn.pollMsg(); err != nil {
-			return
-		}
-		if conn.gotcommand {
-			// < _result(avmsgsid) of createStream
-			if conn.commandname == "_result" {
-				var ok bool
-				if ok, conn.avmsgsid = conn.checkCreateStreamResult(); !ok {
-					err = fmt.Errorf("createStream command failed")
-					return
-				}
-				break
-			}
-		}
+	// < _result(avmsgsid) of createStream
+	if err = conn.waitResult("createStream", 2); err != nil {
+		return
+	}
+
+	var ok bool
+	if ok, conn.avmsgsid = conn.checkCreateStreamResult(); !ok {
+		err = fmt.Errorf("createStream command failed")
+		return
 	}
 
 	// > publish('app')
@@ -1118,9 +1177,13 @@ func (conn *Conn) connectPublish() (err error) {
 	if err = conn.writeCommandMsg(false, 8, conn.avmsgsid, "publish", transid, nil, publishpath); err != nil {
 		return
 	}
-	transid++
 
 	if err = conn.flushWrite(); err != nil {
+		return
+	}
+
+	// < onStatus("NetStream.Publish.Start")
+	if err = conn.waitStatus("publish", float64(transid), "NetStream.Publish.Start"); err != nil {
 		return
 	}
 
@@ -1154,21 +1217,15 @@ func (conn *Conn) connectPlay() (err error) {
 		return
 	}
 
-	for {
-		if err = conn.pollMsg(); err != nil {
-			return
-		}
-		if conn.gotcommand {
-			// < _result(avmsgsid) of createStream
-			if conn.commandname == "_result" {
-				var ok bool
-				if ok, conn.avmsgsid = conn.checkCreateStreamResult(); !ok {
-					err = fmt.Errorf("createStream command failed")
-					return
-				}
-				break
-			}
-		}
+	// < _result(avmsgsid) of createStream
+	if err = conn.waitResult("createStream", 2); err != nil {
+		return
+	}
+
+	var ok bool
+	if ok, conn.avmsgsid = conn.checkCreateStreamResult(); !ok {
+		err = fmt.Errorf("createStream command failed")
+		return
 	}
 
 	// > play('app')
@@ -1179,6 +1236,11 @@ func (conn *Conn) connectPlay() (err error) {
 		return
 	}
 	if err = conn.flushWrite(); err != nil {
+		return
+	}
+
+	// < onStatus("NetStream.Play.Start")
+	if err = conn.waitStatus("play", 0, "NetStream.Play.Start"); err != nil {
 		return
 	}
 
