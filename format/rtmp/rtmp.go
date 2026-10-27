@@ -95,6 +95,11 @@ type Server struct {
 	HandlePlay    func(*Conn)
 	HandleConn    func(*Conn)
 
+	// HandleAuthorize is called when a client wants to publish a stream, before the server
+	// confirms it. conn.URL is set and IsPublishing reports true. If it returns an error, the
+	// client is rejected with the error as description of the status and the connection is closed.
+	HandleAuthorize func(conn *Conn) error
+
 	MaxProbePacketCount   int
 	SkipInvalidMessages   bool
 	DebugChunks           func(conn net.Conn) bool
@@ -126,6 +131,7 @@ func (s *Server) HandleNetConn(netconn net.Conn) (err error) {
 		conn.maxChunkStreams = s.MaxChunkStreams
 	}
 	conn.isserver = true
+	conn.authorize = s.HandleAuthorize
 
 	err = s.handleConn(conn)
 	if Debug {
@@ -271,8 +277,9 @@ const (
 )
 
 type Conn struct {
-	URL             *url.URL
-	OnPlayOrPublish func(string, flvio.AMFMap) error
+	URL *url.URL
+
+	authorize func(conn *Conn) error
 
 	prober  *flv.Prober
 	streams []av.CodecData
@@ -561,6 +568,16 @@ func (conn *Conn) RxBytes() uint64 {
 	return conn.txrxcount.rxbytes
 }
 
+// IsPublishing returns whether the client publishes a stream.
+func (conn *Conn) IsPublishing() bool {
+	return conn.publishing
+}
+
+// IsPlaying returns whether the client plays a stream.
+func (conn *Conn) IsPlaying() bool {
+	return conn.playing
+}
+
 func (conn *Conn) Close() (err error) {
 	return conn.netconn.Close()
 }
@@ -784,9 +801,35 @@ func (conn *Conn) readConnect() (err error) {
 				}
 				publishpath, _ := conn.commandparams[0].(string)
 
-				var cberr error
-				if conn.OnPlayOrPublish != nil {
-					cberr = conn.OnPlayOrPublish(conn.commandname, connectparams)
+				u, uerr := createURL(tcurl, connectpath, publishpath)
+				if uerr != nil {
+					err = fmt.Errorf("invalid URL: %w", uerr)
+					return
+				}
+
+				conn.URL = u
+				conn.publishing = true
+
+				if conn.authorize != nil {
+					if aerr := conn.authorize(conn); aerr != nil {
+						// > onStatus()
+						if err = conn.writeCommandMsg(false, 5, conn.avmsgsid,
+							"onStatus", conn.commandtransid, nil,
+							flvio.AMFMap{
+								"level":       "error",
+								"code":        "NetStream.Publish.BadName",
+								"description": aerr.Error(),
+							},
+						); err != nil {
+							return
+						}
+						if err = conn.flushWrite(); err != nil {
+							return
+						}
+
+						err = fmt.Errorf("publish not authorized: %w", aerr)
+						return
+					}
 				}
 
 				// > onStatus()
@@ -804,19 +847,6 @@ func (conn *Conn) readConnect() (err error) {
 					return
 				}
 
-				if cberr != nil {
-					err = fmt.Errorf("OnPlayOrPublish check failed")
-					return
-				}
-
-				u, uerr := createURL(tcurl, connectpath, publishpath)
-				if uerr != nil {
-					err = fmt.Errorf("invalid URL: %w", uerr)
-					return
-				}
-
-				conn.URL = u
-				conn.publishing = true
 				conn.reading = true
 				conn.stage++
 				return

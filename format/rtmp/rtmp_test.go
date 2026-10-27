@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -1286,4 +1287,90 @@ func TestWriteAVTagTimestamp32Bit(t *testing.T) {
 			require.Equal(t, tc.expected, pio.U24BE(b[1:]), "ts %#x", tc.ts)
 		}
 	}
+}
+
+// authorizeTest runs a server with the given authorization and a client that publishes or plays the url.
+// It returns the onStatus info object the client received, whether the publish or play handler has been called,
+// and the error of the server.
+func authorizeTest(t *testing.T, authorize func(conn *Conn) error, url string, publish bool) (flvio.AMFMap, bool, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	handled := make(chan bool, 1)
+
+	server := &Server{
+		HandleAuthorize: authorize,
+		HandlePublish:   func(conn *Conn) { handled <- true },
+		HandlePlay:      func(conn *Conn) { handled <- true },
+	}
+
+	result := make(chan error, 1)
+
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			result <- err
+			return
+		}
+		result <- server.HandleNetConn(c)
+	}()
+
+	conn, err := Dial("rtmp://"+ln.Addr().String()+url, DialOptions{})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	flags := prepareWriting
+	if !publish {
+		flags = prepareReading
+	}
+	err = conn.prepare(stageCommandDone, flags)
+	require.NoError(t, err)
+
+	// wait for the onStatus of the publish or play command
+	var info flvio.AMFMap
+	for info == nil {
+		err = conn.pollMsg()
+		require.NoError(t, err)
+		if conn.gotcommand && conn.commandname == "onStatus" && len(conn.commandparams) > 0 {
+			info, _ = conn.commandparams[0].(flvio.AMFMap)
+		}
+	}
+
+	err = <-result
+
+	select {
+	case <-handled:
+		return info, true, err
+	default:
+		return info, false, err
+	}
+}
+
+func TestAuthorizePublish(t *testing.T) {
+	authorize := func(conn *Conn) error {
+		if !conn.IsPublishing() || conn.IsPlaying() {
+			return fmt.Errorf("not publishing")
+		}
+		if conn.URL.Path != "/live/test" {
+			return fmt.Errorf("wrong path: %s", conn.URL.Path)
+		}
+		if conn.URL.Query().Get("token") != "secret" {
+			return fmt.Errorf("invalid token")
+		}
+		return nil
+	}
+
+	info, handled, err := authorizeTest(t, authorize, "/live/test?token=secret", true)
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.Equal(t, "status", info["level"])
+	require.Equal(t, "NetStream.Publish.Start", info["code"])
+
+	info, handled, err = authorizeTest(t, authorize, "/live/test?token=wrong", true)
+	require.ErrorContains(t, err, "publish not authorized: invalid token")
+	require.False(t, handled)
+	require.Equal(t, "error", info["level"])
+	require.Equal(t, "NetStream.Publish.BadName", info["code"])
+	require.Equal(t, "invalid token", info["description"])
 }
