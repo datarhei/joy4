@@ -1313,6 +1313,10 @@ func (conn *Conn) writeAMF0Msg(append bool, msgtypeid uint8, csid, msgsid uint32
 		size += flvio.LenAMF0Val(arg)
 	}
 
+	if size > maxMessageLength {
+		return fmt.Errorf("message too long: %d bytes", size)
+	}
+
 	b := conn.tmpwbuf(chunkHeaderLength + size)
 	hdrlen := conn.fillChunkHeader(append, b, csid, 0, msgtypeid, msgsid, size)
 	n := hdrlen
@@ -1388,6 +1392,11 @@ func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
 
 	b := conn.tmpwbuf(actualChunkHeaderLength + flvio.MaxTagSubHeaderLength)
 	hdrlen := tag.FillHeader(b[actualChunkHeaderLength:])
+
+	if hdrlen+len(data) > maxMessageLength {
+		return fmt.Errorf("message too long: %d bytes", hdrlen+len(data))
+	}
+
 	conn.fillChunkHeader(false, b, csid, flvTimestamp, msgtypeid, conn.avmsgsid, hdrlen+len(data))
 
 	if err = conn.writeChunks(b[:actualChunkHeaderLength], csid, flvTimestamp, b[actualChunkHeaderLength:actualChunkHeaderLength+hdrlen], data); err != nil {
@@ -1436,6 +1445,9 @@ func (conn *Conn) writePingResponse(timestamp uint32, append bool) (err error) {
 
 const chunkHeaderLength = 12
 const maxFlvTimestamp = uint32(0xFFFFFF)
+
+// maxMessageLength is the max. length of a message, as the length in the chunk header has 24 bits
+const maxMessageLength = 0xFFFFFF
 
 func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp uint32, msgtypeid uint8, msgsid uint32, msgdatalen int) (n int) {
 	if !append {
@@ -2024,8 +2036,8 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 			return
 		}
 		// a chunk can't be bigger than the max. message length
-		if size > 0xFFFFFF {
-			size = 0xFFFFFF
+		if size > maxMessageLength {
+			size = maxMessageLength
 		}
 		conn.readMaxChunkSize = int(size)
 	case msgtypeidWindowAckSize:

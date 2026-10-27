@@ -15,11 +15,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newReadConn returns a connection that reads the given data.
+// newReadConn returns a connection that reads the given data. Written data (e.g. acks) is discarded.
 func newReadConn(data []byte) *Conn {
 	c1, _ := net.Pipe()
 	conn := NewConn(c1)
 	conn.bufr = bufio.NewReader(bytes.NewReader(data))
+	conn.bufw = bufio.NewWriter(io.Discard)
 	return conn
 }
 
@@ -649,4 +650,72 @@ func TestWriteCommandMsgChunks(t *testing.T) {
 	require.True(t, rconn.gotcommand)
 	require.Equal(t, "onStatus", rconn.commandname)
 	require.Equal(t, []interface{}{flvio.AMFMap{"description": description}}, rconn.commandparams)
+}
+
+func TestWriteAVTagMaxMessageLength(t *testing.T) {
+	// the tag header of an AVC NALU is 5 bytes
+	tag := flvio.Tag{
+		Type:          flvio.TAG_VIDEO,
+		FrameType:     flvio.FRAME_KEY,
+		CodecID:       flvio.VIDEO_H264,
+		AVCPacketType: flvio.AVC_NALU,
+		Data:          make([]byte, maxMessageLength-5),
+	}
+
+	conn, buf := newWriteConn()
+	conn.avmsgsid = 1
+	conn.writeMaxChunkSize = 65536
+
+	err := conn.writeAVTag(tag, 40)
+	require.NoError(t, err)
+
+	rconn := newReadConn(buf.Bytes())
+	rconn.readMaxChunkSize = 65536
+
+	err = rconn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, maxMessageLength, len(rconn.msgdata))
+	require.Equal(t, len(tag.Data), len(rconn.avtag.Data))
+
+	// one byte more
+	tag.Data = make([]byte, maxMessageLength-4)
+
+	conn, buf = newWriteConn()
+	conn.avmsgsid = 1
+
+	err = conn.writeAVTag(tag, 40)
+	require.Error(t, err)
+	err = conn.flushWrite()
+	require.NoError(t, err)
+	require.Equal(t, 0, buf.Len())
+}
+
+func TestWriteDataMsgMaxMessageLength(t *testing.T) {
+	// a long string has a 5 byte header
+	value := string(bytes.Repeat([]byte{'x'}, maxMessageLength-5))
+
+	conn, buf := newWriteConn()
+	conn.writeMaxChunkSize = 65536
+
+	err := conn.writeDataMsg(5, 1, value)
+	require.NoError(t, err)
+	err = conn.flushWrite()
+	require.NoError(t, err)
+
+	rconn := newReadConn(buf.Bytes())
+	rconn.readMaxChunkSize = 65536
+
+	err = rconn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, maxMessageLength, len(rconn.msgdata))
+	require.Equal(t, []interface{}{value}, rconn.datamsgvals)
+
+	// one byte more
+	conn, buf = newWriteConn()
+
+	err = conn.writeDataMsg(5, 1, value+"x")
+	require.Error(t, err)
+	err = conn.flushWrite()
+	require.NoError(t, err)
+	require.Equal(t, 0, buf.Len())
 }

@@ -17,7 +17,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 10. [x] **Client handshake.** C1 is all zeros (`hsCreate01` is commented out), and S0's version is not checked. The `if ver != 0` branch is dead code, because C2 = S1 either way, so a complex-handshake response is never computed. Some strict servers or CDNs may reject this.
     - [ ] The complex (digest) handshake is still not implemented in the client (the simple handshake is fixed).
 11. [x] **AMF messages are never split into chunks.** `writeAMF0Msg` writes the whole message as one chunk, whatever `writeMaxChunkSize` is. Today this is hidden by the 64 KB chunk size, but metadata over 64 KB (user-supplied via `SetMetaData`) desyncs the peer. It should reuse the chunking loop from `writeAVTag`.
-12. [ ] **Messages over 16 MB are not checked.** `PutU24BE` silently truncates the length in `fillChunkHeader`.
+12. [x] **Messages over 16 MB are not checked.** `PutU24BE` silently truncates the length in `fillChunkHeader`.
 13. [ ] **Type 3 continuation with extended timestamp.** At `:1670-1680`, the code peeks 4 bytes and guesses whether they are the extended timestamp. If the payload happens to start with those bytes, it desyncs. It also reads into bufio's own peek buffer (use `Discard(4)`), and those 4 bytes are not added to `n`, so the ack count is low.
 14. [ ] **Unhandled control messages.** Abort (2) is not handled; it should drop the partial message on that csid. SetPeerBandwidth (6) is not answered with a WindowAckSize.
 15. [ ] **Limit of 16 chunk-stream ids** (`:1490`). This is a reasonable DoS guard but arbitrary. Some encoders use high csids. Make it configurable and document it.
