@@ -1658,6 +1658,8 @@ func (conn *Conn) readChunk() (err error) {
 			cs.hastimeext = false
 		}
 		cs.timenow = timestamp
+		// a following type 3 chunk uses the timestamp as delta
+		cs.timedelta = timestamp
 		//fmt.Printf(", timenow = %d", cs.timenow)
 		cs.Start()
 
@@ -1758,32 +1760,20 @@ func (conn *Conn) readChunk() (err error) {
 		}
 
 		if cs.msgdataleft == 0 {
-			switch cs.msghdrtype {
-			case 0:
-				if cs.hastimeext {
-					if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
-						return
-					}
-					n += 4
-					timestamp = pio.U32BE(b)
-					//fmt.Printf("type 3   (0): timestamp = %d", timestamp)
-					cs.timenow = timestamp
-					cs.timeext = timestamp
+			// A new message with the timestamp delta of the previous chunk. If the previous chunk is
+			// of type 0, the delta is its timestamp (RTMP spec 5.3.1.2.4).
+			if cs.hastimeext {
+				if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
+					return
 				}
-			case 1, 2:
-				if cs.hastimeext {
-					if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
-						return
-					}
-					n += 4
-					timestamp = pio.U32BE(b)
-					cs.timeext = timestamp
-				} else {
-					timestamp = cs.timedelta
-				}
-				//fmt.Printf("type 3 (1,2): timestamp (delta) = %d", timestamp)
-				cs.timenow += timestamp
+				n += 4
+				timestamp = pio.U32BE(b)
+				cs.timeext = timestamp
+			} else {
+				timestamp = cs.timedelta
 			}
+			//fmt.Printf("type 3: timestamp (delta) = %d", timestamp)
+			cs.timenow += timestamp
 			//fmt.Printf(", timenow = %d", cs.timenow)
 			cs.Start()
 		} else if cs.hastimeext && cs.timeextrepeat != timeextRepeatNo {

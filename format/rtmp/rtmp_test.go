@@ -1010,3 +1010,67 @@ func TestMaxChunkStreamsOptions(t *testing.T) {
 	defer conn2.Close()
 	require.Equal(t, DefaultMaxChunkStreams, conn2.maxChunkStreams)
 }
+
+// type3Message returns a message with a type 3 chunk header only (fits in one chunk).
+func type3Message(csid uint8, payload []byte) []byte {
+	return append([]byte{0xc0 | (csid & 0x3f)}, payload...)
+}
+
+func TestReadChunkType3AfterType0(t *testing.T) {
+	// audio messages of the same size, every 20 ms, starting at 20 ms (RTMP spec 5.3.1.2.4)
+	payload := append([]byte{0x2e}, bytes.Repeat([]byte{0xCC}, 99)...)
+
+	data := chunkMessage(4, 20, msgtypeidAudioMsg, 1, payload, 128)
+	data = append(data, type3Message(4, payload)...)
+	data = append(data, type3Message(4, payload)...)
+
+	conn := newReadConn(data)
+
+	for _, ts := range []int64{20, 40, 60} {
+		err := conn.pollMsg()
+		require.NoError(t, err)
+		require.Equal(t, uint8(msgtypeidAudioMsg), conn.msgtypeid)
+		require.Equal(t, ts, conn.timestamp)
+		require.Equal(t, payload, conn.msgdata)
+	}
+}
+
+func TestReadChunkType3AfterType0ExtendedTimestamp(t *testing.T) {
+	payload := append([]byte{0x2e}, bytes.Repeat([]byte{0xCC}, 99)...)
+
+	data := chunkMessageExt(4, 0x01000000, msgtypeidAudioMsg, 1, payload, 128, false)
+	// the type 3 chunk header has the extended timestamp with the delta
+	data = append(data, 0xc4, 0x01, 0x00, 0x00, 0x00)
+	data = append(data, payload...)
+
+	conn := newReadConn(data)
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, int64(0x01000000), conn.timestamp)
+
+	err = conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, int64(0x02000000), conn.timestamp)
+	require.Equal(t, payload, conn.msgdata)
+}
+
+func TestReadChunkType3AfterType2(t *testing.T) {
+	// the spec's example 1: type 0, type 2 with the delta, then type 3
+	payload := append([]byte{0x2e}, bytes.Repeat([]byte{0xCC}, 99)...)
+
+	data := chunkMessage(4, 1000, msgtypeidAudioMsg, 1, payload, 128)
+	data = append(data, 0x84, 0x00, 0x00, 0x21) // type 2, delta 33
+	data = append(data, payload...)
+	data = append(data, type3Message(4, payload)...)
+	data = append(data, type3Message(4, payload)...)
+
+	conn := newReadConn(data)
+
+	for _, ts := range []int64{1000, 1033, 1066, 1099} {
+		err := conn.pollMsg()
+		require.NoError(t, err)
+		require.Equal(t, ts, conn.timestamp)
+		require.Equal(t, payload, conn.msgdata)
+	}
+}
