@@ -34,7 +34,8 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 22. [x] **`objectEncoding` default is wrong.** It defaults to **3** when the client didn't send it (`:625-628`). The server only speaks AMF0, so it should be 0. AMF3 command messages (type 17) are parsed as AMF0 after skipping one byte, so any real AMF3 value (`0x11` avmplus marker) fails. AMF3 data messages (type 15) are ignored.
     - [ ] AMF3 values in command messages (type 17) and data messages (type 15) are still not supported.
 23. [x] **`onStatus` transaction id.** It uses the request's transid; the spec says 0. The publish `type` argument is ignored (fine). `releaseStream`, `FCPublish`, `FCUnpublish`, `deleteStream`, `closeStream` and `getStreamLength` get no reply. Some clients wait for `onFCPublish`.
-24. [ ] **Commands are ignored after setup.** Once the stream is publishing or playing, commands are dropped (`pollAVTag`). `deleteStream` / `FCUnpublish` from a publisher don't end the stream; only TCP EOF does. In server play mode nobody reads from the socket, so pause, seek and closeStream from players are never seen.
+24. [x] **Commands are ignored after setup.** Once the stream is publishing or playing, commands are dropped (`pollAVTag`). `deleteStream` / `FCUnpublish` from a publisher don't end the stream; only TCP EOF does. In server play mode nobody reads from the socket, so pause, seek and closeStream from players are never seen.
+    - [ ] During playback nobody reads from the socket of the player, so closeStream, deleteStream, pause, acks and ping responses of players are never seen. Needs a read loop alongside WritePacket, see #43.
 25. [ ] **Client does not handle errors.** `_error` replies to connect or createStream are ignored, so it loops until the peer closes. Transaction ids are not matched. The client doesn't wait for `NetStream.Publish.Start` or `Play.Start`, and it never surfaces `onStatus` errors (BadName, StreamNotFound, UnpublishNotify).
 26. [ ] **Client publishing never reads.** Server pings are never answered and server acks and onStatus messages pile up. Some servers drop clients that don't answer pings.
 27. [ ] **Client details.** It sends SetPeerBandwidth (normally server-to-client only). SetBufferLength goes to msgsid 0 before the stream exists, so it has no effect. `publish` has no `"live"` argument, and `releaseStream`/`FCPublish` are not sent, which some CDNs require.
@@ -59,7 +60,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 
 ## G. Concurrency / lifecycle / API
 42. [ ] **Data race on the byte counters.** `TxBytes`/`RxBytes` are read from other goroutines without atomics.
-43. [ ] **`Conn` is not safe for concurrent reads and writes.** The read path writes Acks and Ping responses through the shared `bufw` and `writebuf`. Any user who reads and writes at the same time (needed to fix #24/#26) will corrupt output. A write mutex is needed.
+43. [ ] **`Conn` is not safe for concurrent reads and writes.** The read path writes Acks and Ping responses through the shared `bufw` and `writebuf`. Any user who reads and writes at the same time (needed to fix #24/#26) will corrupt output. A write mutex is needed. This is also needed for reading from the socket of a player during playback (#24).
 44. [ ] **Unsynchronized server shutdown.** `Server.Close` races with `Serve` on `listener`/`doneChan`, and calling `Close` twice can panic. Active connections are not closed.
 45. [ ] **Leaking `Handler` helpers.** `ServerMuxer` and `ServerDemuxer` leak the server, and they block forever on unbuffered channels for a second client or when `ListenAndServe` returns.
 46. [ ] **Minor:**

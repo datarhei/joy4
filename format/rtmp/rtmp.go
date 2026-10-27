@@ -306,6 +306,7 @@ type Conn struct {
 
 	isserver            bool
 	publishing, playing bool
+	unpublished         bool // the publisher ended the stream
 	reading, writing    bool
 	stage               int
 
@@ -594,10 +595,26 @@ func (conn *Conn) pollCommand() (err error) {
 }
 
 func (conn *Conn) pollAVTag() (tag flvio.Tag, err error) {
+	if conn.unpublished {
+		err = io.EOF
+		return
+	}
+
 	for {
 		if err = conn.pollMsg(); err != nil {
 			return
 		}
+
+		if conn.gotcommand && conn.isserver && conn.publishing {
+			switch conn.commandname {
+			case "FCUnpublish", "deleteStream", "closeStream":
+				// the publisher ends the stream
+				conn.unpublished = true
+				err = io.EOF
+				return
+			}
+		}
+
 		switch conn.msgtypeid {
 		case msgtypeidVideoMsg, msgtypeidAudioMsg:
 			tag = conn.avtag

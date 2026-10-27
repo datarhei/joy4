@@ -1551,3 +1551,78 @@ func TestCommandsWithoutAnswer(t *testing.T) {
 	info, _ := answers[3].params[0].(flvio.AMFMap)
 	require.Equal(t, "NetStream.Play.Start", info["code"])
 }
+
+// dataMessage returns an AMF0 data message on chunk stream 4.
+func dataMessage(args ...interface{}) []byte {
+	size := 0
+	for _, arg := range args {
+		size += flvio.LenAMF0Val(arg)
+	}
+	payload := make([]byte, size)
+	n := 0
+	for _, arg := range args {
+		n += flvio.FillAMF0Val(payload[n:], arg)
+	}
+	return chunkMessage(4, 0, msgtypeidDataMsgAMF0, 1, payload, 128)
+}
+
+// publishData returns the commands of a publisher and an AAC stream with the given number of frames.
+func publishData(frames int) []byte {
+	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"})
+	data = append(data, commandMessage("createStream", 2.0, nil)...)
+	data = append(data, commandMessage("publish", 3.0, nil, "test", "live")...)
+	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"audiocodecid": 10.0})...)
+	// AAC sequence header: AAC LC, 44.1 kHz, stereo
+	data = append(data, chunkMessage(4, 0, msgtypeidAudioMsg, 1, []byte{0xAF, 0x00, 0x12, 0x10}, 128)...)
+	for i := 0; i < frames; i++ {
+		data = append(data, chunkMessage(4, uint32(23*i), msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, byte(i)}, 128)...)
+	}
+	return data
+}
+
+func TestPublisherEndsStream(t *testing.T) {
+	for _, command := range []string{"FCUnpublish", "deleteStream", "closeStream"} {
+		t.Run(command, func(t *testing.T) {
+			data := publishData(3)
+			if command == "deleteStream" {
+				data = append(data, commandMessage(command, 6.0, nil, 1.0)...)
+			} else {
+				data = append(data, commandMessage(command, 6.0, nil, "test")...)
+			}
+			// must not be read anymore
+			data = append(data, chunkMessage(4, 1000, msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, 0xFF}, 128)...)
+
+			conn := newReadConn(data)
+			conn.isserver = true
+			conn.stage = stageHandshakeDone
+
+			for i := 0; i < 3; i++ {
+				pkt, err := conn.ReadPacket()
+				require.NoError(t, err, "packet %d", i)
+				require.Equal(t, []byte{byte(i)}, pkt.Data, "packet %d", i)
+			}
+
+			_, err := conn.ReadPacket()
+			require.ErrorIs(t, err, io.EOF)
+
+			// the end of the stream stays
+			_, err = conn.ReadPacket()
+			require.ErrorIs(t, err, io.EOF)
+		})
+	}
+}
+
+func TestPublisherEndsStreamTCP(t *testing.T) {
+	// without a command, the stream ends with the connection
+	conn := newReadConn(publishData(3))
+	conn.isserver = true
+	conn.stage = stageHandshakeDone
+
+	for i := 0; i < 3; i++ {
+		_, err := conn.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+	}
+
+	_, err := conn.ReadPacket()
+	require.ErrorIs(t, err, io.EOF)
+}
