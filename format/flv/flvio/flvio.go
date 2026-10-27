@@ -310,6 +310,10 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 
 		if t.FourCC == FOURCC_HEVC {
 			if t.PacketType == PKTTYPE_CODED_FRAMES {
+				if len(b) < n+3 {
+					err = fmt.Errorf("videodata: parse invalid: not enough bytes for the composition time")
+					return
+				}
 				t.CompositionTime = int64(pio.I24BE(b[n:]))
 				n += 3
 			}
