@@ -735,15 +735,8 @@ func (conn *Conn) readConnect() (err error) {
 		tcurl, _ = _tcurl.(string)
 	}
 
-	connectparams := conn.commandobj
-
 	if err = conn.writeBasicConf(); err != nil {
 		return
-	}
-
-	objectEncoding, ok := connectparams["objectEncoding"]
-	if !ok {
-		objectEncoding = 3
 	}
 
 	// > _result("NetConnection.Connect.Success")
@@ -756,7 +749,7 @@ func (conn *Conn) readConnect() (err error) {
 			"level":          "status",
 			"code":           "NetConnection.Connect.Success",
 			"description":    "Connection succeeded.",
-			"objectEncoding": objectEncoding,
+			"objectEncoding": 0, // only AMF0 is supported
 		},
 	); err != nil {
 		return

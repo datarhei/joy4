@@ -1402,3 +1402,63 @@ func TestAuthorizePlay(t *testing.T) {
 	require.Equal(t, "NetStream.Play.StreamNotFound", info["code"])
 	require.Equal(t, "invalid token", info["description"])
 }
+
+// commandMessage returns an AMF0 command message on chunk stream 3.
+func commandMessage(args ...interface{}) []byte {
+	size := 0
+	for _, arg := range args {
+		size += flvio.LenAMF0Val(arg)
+	}
+	payload := make([]byte, size)
+	n := 0
+	for _, arg := range args {
+		n += flvio.FillAMF0Val(payload[n:], arg)
+	}
+	return chunkMessage(3, 0, msgtypeidCommandMsgAMF0, 0, payload, 128)
+}
+
+func TestConnectObjectEncoding(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		encoding interface{}
+	}{
+		{"none", nil},
+		{"AMF0", 0.0},
+		{"AMF3", 3.0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := flvio.AMFMap{
+				"app":   "live",
+				"tcUrl": "rtmp://localhost/live",
+			}
+			if tc.encoding != nil {
+				params["objectEncoding"] = tc.encoding
+			}
+
+			conn := newReadConn(commandMessage("connect", 1.0, params))
+			buf := &bytes.Buffer{}
+			conn.bufw = bufio.NewWriter(buf)
+			conn.isserver = true
+
+			// fails at the end of the data, after the answer to connect
+			err := conn.readConnect()
+			require.ErrorIs(t, err, io.EOF)
+
+			// the answer of the server
+			rconn := newReadConn(buf.Bytes())
+			rconn.readMaxChunkSize = 65536
+
+			var info flvio.AMFMap
+			for info == nil {
+				err = rconn.pollMsg()
+				require.NoError(t, err)
+				if rconn.gotcommand && rconn.commandname == "_result" && len(rconn.commandparams) > 0 {
+					info, _ = rconn.commandparams[0].(flvio.AMFMap)
+				}
+			}
+
+			require.Equal(t, "NetConnection.Connect.Success", info["code"])
+			require.Equal(t, 0.0, info["objectEncoding"])
+		})
+	}
+}
