@@ -1462,3 +1462,92 @@ func TestConnectObjectEncoding(t *testing.T) {
 		})
 	}
 }
+
+type commandAnswer struct {
+	name    string
+	transid float64
+	params  []interface{}
+}
+
+// commandsAnswer feeds the server side with the commands and returns the commands it answers with.
+func commandsAnswer(t *testing.T, commands ...[]byte) []commandAnswer {
+	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"})
+	for _, c := range commands {
+		data = append(data, c...)
+	}
+
+	conn := newReadConn(data)
+	buf := &bytes.Buffer{}
+	conn.bufw = bufio.NewWriter(buf)
+	conn.isserver = true
+
+	err := conn.readConnect()
+	if err != nil {
+		require.ErrorIs(t, err, io.EOF)
+	}
+	conn.flushWrite()
+
+	// the answers of the server
+	rconn := newReadConn(buf.Bytes())
+	rconn.readMaxChunkSize = 65536
+
+	answers := []commandAnswer{}
+	for {
+		if err := rconn.pollMsg(); err != nil {
+			break
+		}
+		if rconn.gotcommand {
+			answers = append(answers, commandAnswer{rconn.commandname, rconn.commandtransid, rconn.commandparams})
+		}
+	}
+
+	return answers
+}
+
+func TestCommandsFMLEPublish(t *testing.T) {
+	// the commands of FFmpeg and OBS before publishing
+	answers := commandsAnswer(t,
+		commandMessage("releaseStream", 2.0, nil, "test"),
+		commandMessage("FCPublish", 3.0, nil, "test"),
+		commandMessage("createStream", 4.0, nil),
+		commandMessage("publish", 5.0, nil, "test", "live"),
+	)
+
+	names := []string{}
+	for _, a := range answers {
+		names = append(names, a.name)
+	}
+	require.Equal(t, []string{"_result", "onBWDone", "_result", "_result", "_result", "onStatus"}, names)
+
+	// connect, releaseStream, FCPublish, createStream
+	require.Equal(t, 1.0, answers[0].transid)
+	require.Equal(t, 2.0, answers[2].transid)
+	require.Equal(t, 3.0, answers[3].transid)
+	require.Equal(t, 4.0, answers[4].transid)
+	require.Equal(t, []interface{}{1.0}, answers[4].params)
+
+	// onStatus has transaction id 0
+	require.Equal(t, 0.0, answers[5].transid)
+	info, _ := answers[5].params[0].(flvio.AMFMap)
+	require.Equal(t, "NetStream.Publish.Start", info["code"])
+}
+
+func TestCommandsWithoutAnswer(t *testing.T) {
+	// commands with transaction id 0 don't expect an answer
+	answers := commandsAnswer(t,
+		commandMessage("releaseStream", 0.0, nil, "test"),
+		commandMessage("FCPublish", 0.0, nil, "test"),
+		commandMessage("createStream", 2.0, nil),
+		commandMessage("play", 0.0, nil, "test"),
+	)
+
+	names := []string{}
+	for _, a := range answers {
+		names = append(names, a.name)
+	}
+	require.Equal(t, []string{"_result", "onBWDone", "_result", "onStatus"}, names)
+
+	require.Equal(t, 0.0, answers[3].transid)
+	info, _ := answers[3].params[0].(flvio.AMFMap)
+	require.Equal(t, "NetStream.Play.Start", info["code"])
+}

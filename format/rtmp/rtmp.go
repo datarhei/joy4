@@ -771,6 +771,18 @@ func (conn *Conn) readConnect() (err error) {
 		if conn.gotcommand {
 			switch conn.commandname {
 
+			// < releaseStream("path"), FCPublish("path")
+			case "releaseStream", "FCPublish":
+				// > _result(), only if the client expects an answer
+				if conn.commandtransid != 0 {
+					if err = conn.writeCommandMsg(false, 3, 0, "_result", conn.commandtransid, nil); err != nil {
+						return
+					}
+					if err = conn.flushWrite(); err != nil {
+						return
+					}
+				}
+
 			// < createStream
 			case "createStream":
 				conn.avmsgsid = uint32(1)
@@ -807,7 +819,7 @@ func (conn *Conn) readConnect() (err error) {
 					if aerr := conn.authorize(conn); aerr != nil {
 						// > onStatus()
 						if err = conn.writeCommandMsg(false, 5, conn.avmsgsid,
-							"onStatus", conn.commandtransid, nil,
+							"onStatus", 0, nil,
 							flvio.AMFMap{
 								"level":       "error",
 								"code":        "NetStream.Publish.BadName",
@@ -827,7 +839,7 @@ func (conn *Conn) readConnect() (err error) {
 
 				// > onStatus()
 				if err = conn.writeCommandMsg(false, 5, conn.avmsgsid,
-					"onStatus", conn.commandtransid, nil,
+					"onStatus", 0, nil,
 					flvio.AMFMap{
 						"level":       "status",
 						"code":        "NetStream.Publish.Start",
@@ -869,7 +881,7 @@ func (conn *Conn) readConnect() (err error) {
 					if aerr := conn.authorize(conn); aerr != nil {
 						// > onStatus()
 						if err = conn.writeCommandMsg(false, 5, conn.avmsgsid,
-							"onStatus", conn.commandtransid, nil,
+							"onStatus", 0, nil,
 							flvio.AMFMap{
 								"level":       "error",
 								"code":        "NetStream.Play.StreamNotFound",
@@ -894,7 +906,7 @@ func (conn *Conn) readConnect() (err error) {
 
 				// > onStatus()
 				if err = conn.writeCommandMsg(false, 5, conn.avmsgsid,
-					"onStatus", conn.commandtransid, nil,
+					"onStatus", 0, nil,
 					flvio.AMFMap{
 						"level":       "status",
 						"code":        "NetStream.Play.Start",
