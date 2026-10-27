@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/datarhei/joy4/utils/bits/pio"
 	"github.com/stretchr/testify/require"
 )
@@ -19,6 +20,15 @@ func newReadConn(data []byte) *Conn {
 	conn := NewConn(c1)
 	conn.bufr = bufio.NewReader(bytes.NewReader(data))
 	return conn
+}
+
+// newWriteConn returns a connection that writes into the returned buffer.
+func newWriteConn() (*Conn, *bytes.Buffer) {
+	c1, _ := net.Pipe()
+	conn := NewConn(c1)
+	buf := &bytes.Buffer{}
+	conn.bufw = bufio.NewWriter(buf)
+	return conn, buf
 }
 
 // chunkHeader0 returns a type 0 chunk header (timestamp < 0xFFFFFF).
@@ -240,5 +250,71 @@ func TestSetupTimeoutRemovedAfterSetup(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		require.Fail(t, "timeout waiting for the server")
+	}
+}
+
+func TestWriteAVTagExtendedTimestamp(t *testing.T) {
+	data := make([]byte, 1000)
+	for i := range data {
+		data[i] = byte(i)
+	}
+
+	tag := flvio.Tag{
+		Type:          flvio.TAG_VIDEO,
+		FrameType:     flvio.FRAME_KEY,
+		CodecID:       flvio.VIDEO_H264,
+		AVCPacketType: flvio.AVC_NALU,
+		Data:          data,
+	}
+
+	for _, ts := range []int64{0, 0xFFFFFE, 0xFFFFFF, 0x1000000, 0x7FFFFF00} {
+		wconn, buf := newWriteConn()
+		wconn.avmsgsid = 1
+
+		// the message is bigger than the chunk size, such that type 3 chunks follow
+		err := wconn.writeAVTag(tag, ts)
+		require.NoError(t, err, "ts %#x", ts)
+
+		// a following message must be read correctly as well
+		err = wconn.writeAVTag(tag, ts+40)
+		require.NoError(t, err, "ts %#x", ts)
+
+		rconn := newReadConn(buf.Bytes())
+
+		err = rconn.pollMsg()
+		require.NoError(t, err, "ts %#x", ts)
+		require.Equal(t, uint8(msgtypeidVideoMsg), rconn.msgtypeid, "ts %#x", ts)
+		require.Equal(t, ts, rconn.timestamp, "ts %#x", ts)
+		require.Equal(t, data, rconn.avtag.Data, "ts %#x", ts)
+
+		err = rconn.pollMsg()
+		require.NoError(t, err, "ts %#x", ts)
+		require.Equal(t, uint8(msgtypeidVideoMsg), rconn.msgtypeid, "ts %#x", ts)
+		require.Equal(t, ts+40, rconn.timestamp, "ts %#x", ts)
+		require.Equal(t, data, rconn.avtag.Data, "ts %#x", ts)
+	}
+}
+
+func TestFillChunkHeaderExtendedTimestamp(t *testing.T) {
+	conn, _ := newWriteConn()
+
+	for _, tc := range []struct {
+		timestamp uint32
+		length    int
+	}{
+		{0xFFFFFE, 12},
+		{0xFFFFFF, 16},
+		{0x1000000, 16},
+	} {
+		b := make([]byte, 16)
+		n := conn.fillChunkHeader(false, b, 3, tc.timestamp, msgtypeidCommandMsgAMF0, 0, 0)
+		require.Equal(t, tc.length, n, "ts %#x", tc.timestamp)
+
+		if tc.length == 16 {
+			require.Equal(t, maxFlvTimestamp, pio.U24BE(b[1:]), "ts %#x", tc.timestamp)
+			require.Equal(t, tc.timestamp, pio.U32BE(b[12:]), "ts %#x", tc.timestamp)
+		} else {
+			require.Equal(t, tc.timestamp, pio.U24BE(b[1:]), "ts %#x", tc.timestamp)
+		}
 	}
 }

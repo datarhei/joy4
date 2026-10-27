@@ -1342,7 +1342,7 @@ func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
 	flvTimestamp := uint32(ts & 0x7FFFFFFF)
 
 	actualChunkHeaderLength := chunkHeaderLength
-	if flvTimestamp > maxFlvTimestamp {
+	if flvTimestamp >= maxFlvTimestamp {
 		actualChunkHeaderLength += 4
 	}
 
@@ -1453,7 +1453,7 @@ func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp 
 
 		b[n] = byte(csid) & 0x3f
 		n++
-		if timestamp <= maxFlvTimestamp {
+		if timestamp < maxFlvTimestamp {
 			pio.PutU24BE(b[n:], timestamp)
 		} else {
 			pio.PutU24BE(b[n:], maxFlvTimestamp)
@@ -1465,7 +1465,7 @@ func (conn *Conn) fillChunkHeader(append bool, b []byte, csid uint32, timestamp 
 		n++
 		pio.PutU32LE(b[n:], msgsid)
 		n += 4
-		if timestamp > maxFlvTimestamp {
+		if timestamp >= maxFlvTimestamp {
 			pio.PutU32BE(b[n:], timestamp)
 			n += 4
 		}
