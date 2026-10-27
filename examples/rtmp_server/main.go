@@ -138,7 +138,10 @@ func (s *server) handlePlay(conn *rtmp.Conn) {
 		}
 
 		err := avutil.CopyFile(conn, demuxer)
-		s.log("PLAY", "STOP", conn.URL.Path, err.Error(), client)
+		if err != nil {
+			s.log("PLAY", "ERROR", conn.URL.Path, err.Error(), client)
+		}
+		s.log("PLAY", "STOP", conn.URL.Path, "", client)
 	} else {
 		s.log("PLAY", "NOTFOUND", conn.URL.Path, "", client)
 	}

@@ -1963,3 +1963,87 @@ func TestClientPublishServerCloses(t *testing.T) {
 
 	require.NoError(t, <-result)
 }
+
+func TestServerPlayReadLoop(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	result := make(chan error, 1)
+
+	// the server sends AAC packets until WritePacket returns an error
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			result <- err
+			return
+		}
+		defer c.Close()
+
+		s := NewConn(c)
+		s.isserver = true
+		if err := s.prepare(stageCommandDone, 0); err != nil {
+			result <- err
+			return
+		}
+
+		stream, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+		if err != nil {
+			result <- err
+			return
+		}
+		if err := s.WriteHeader([]av.CodecData{stream}); err != nil {
+			result <- err
+			return
+		}
+
+		start := time.Now()
+		for i := 0; time.Since(start) < 5*time.Second; i++ {
+			if err := s.WritePacket(av.Packet{Idx: 0, Data: []byte{byte(i)}, Time: int64(23 * i)}); err != nil {
+				result <- err
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		result <- nil
+	}()
+
+	conn, err := Dial("rtmp://"+ln.Addr().String()+"/live/test", DialOptions{})
+	require.NoError(t, err)
+	defer conn.Close()
+	conn.SetReadIdleTimeout(2 * time.Second)
+
+	for i := 0; i < 3; i++ {
+		_, err := conn.ReadPacket()
+		require.NoError(t, err)
+	}
+
+	// > ping request, the server answers while sending the stream
+	ping := chunkMessage(2, 0, msgtypeidUserControl, 0, []byte{0x00, eventtypePingRequest, 0x00, 0x00, 0x30, 0x39}, 128)
+	conn.wlock.Lock()
+	conn.bufw.Write(ping)
+	conn.bufw.Flush()
+	conn.wlock.Unlock()
+
+	for {
+		err := conn.pollMsg()
+		require.NoError(t, err)
+		if conn.msgtypeid == msgtypeidUserControl && conn.eventtype == eventtypePingResponse {
+			require.Equal(t, uint32(0x3039), pio.U32BE(conn.msgdata[2:]))
+			break
+		}
+	}
+
+	// > deleteStream, the connection stays open
+	err = conn.writeCommandMsg(false, 3, 0, "deleteStream", 0, nil, 1.0)
+	require.NoError(t, err)
+	err = conn.flushWrite()
+	require.NoError(t, err)
+
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, io.EOF)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "the server didn't stop sending the stream")
+	}
+}

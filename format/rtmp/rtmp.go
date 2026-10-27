@@ -317,7 +317,7 @@ type Conn struct {
 	reading, writing    bool
 	stage               int
 
-	// the error of the read loop of a publishing client
+	// the error of the read loop while writing the stream
 	readLoopLock sync.Mutex
 	readLoopErr  error
 
@@ -1447,17 +1447,17 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 	conn.streams = streams
 	conn.stage++
 
-	if !conn.isserver {
-		// the server is not required to send anything while the client publishes
-		conn.netconn.SetReadIdleTimeout(0)
-		go conn.readLoop()
-	}
+	// the peer is not required to send anything while a client publishes or a server sends to a player
+	conn.netconn.SetReadIdleTimeout(0)
+	go conn.readLoop()
 
 	return
 }
 
-// readLoop reads the messages of the server while the client publishes, such that pings are answered and
-// acks are sent. A read error or an error status of the server is returned by the next WritePacket.
+// readLoop reads the messages of the peer while writing the stream, i.e. while a client publishes or
+// while a server sends the stream to a player, such that pings are answered and acks are sent. A read
+// error, an error status of the server, or the end of the stream by the player (io.EOF) is returned by
+// the next WritePacket.
 func (conn *Conn) readLoop() {
 	for {
 		if err := conn.pollMsg(); err != nil {
@@ -1465,7 +1465,18 @@ func (conn *Conn) readLoop() {
 			return
 		}
 
-		if conn.gotcommand && conn.commandname == "onStatus" {
+		if !conn.gotcommand {
+			continue
+		}
+
+		if conn.isserver {
+			switch conn.commandname {
+			case "closeStream", "deleteStream":
+				// the player ends the stream
+				conn.setReadLoopError(io.EOF)
+				return
+			}
+		} else if conn.commandname == "onStatus" {
 			info := conn.statusInfo()
 			if level, _ := info["level"].(string); level == "error" {
 				conn.setReadLoopError(fmt.Errorf("publish failed: %s", statusDescription(info)))
