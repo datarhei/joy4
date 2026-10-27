@@ -269,7 +269,7 @@ func TestWriteAVTagExtendedTimestamp(t *testing.T) {
 		Data:          data,
 	}
 
-	for _, ts := range []int64{0, 0xFFFFFE, 0xFFFFFF, 0x1000000, 0x7FFFFF00, 0x7FFFFFFF} {
+	for _, ts := range []int64{0, 0xFFFFFE, 0xFFFFFF, 0x1000000, 0x7FFFFF00, 0x7FFFFFFF, 0xFFFFFFFF} {
 		wconn, buf := newWriteConn()
 		wconn.avmsgsid = 1
 
@@ -1252,4 +1252,38 @@ func TestWallclockTimeDisconnect(t *testing.T) {
 	err := conn.pollMsg()
 	require.ErrorContains(t, err, "non-changing timestamps")
 	require.False(t, conn.genwallclocktime)
+}
+
+func TestWriteAVTagTimestamp32Bit(t *testing.T) {
+	tag := flvio.Tag{
+		Type:          flvio.TAG_VIDEO,
+		FrameType:     flvio.FRAME_KEY,
+		CodecID:       flvio.VIDEO_H264,
+		AVCPacketType: flvio.AVC_NALU,
+		Data:          []byte{1, 2, 3},
+	}
+
+	for _, tc := range []struct {
+		ts       int64
+		expected uint32
+	}{
+		{0x7FFFFFFF, 0x7FFFFFFF},
+		{0x80000000, 0x80000000}, // no wraparound at 2^31
+		{0xFFFFFFFF, 0xFFFFFFFF},
+		{0x100000027, 0x27}, // wraparound at 2^32
+	} {
+		conn, buf := newWriteConn()
+		conn.avmsgsid = 1
+
+		err := conn.writeAVTag(tag, tc.ts)
+		require.NoError(t, err, "ts %#x", tc.ts)
+
+		b := buf.Bytes()
+		if tc.expected >= maxFlvTimestamp {
+			require.Equal(t, maxFlvTimestamp, pio.U24BE(b[1:]), "ts %#x", tc.ts)
+			require.Equal(t, tc.expected, pio.U32BE(b[12:]), "ts %#x", tc.ts)
+		} else {
+			require.Equal(t, tc.expected, pio.U24BE(b[1:]), "ts %#x", tc.ts)
+		}
+	}
 }

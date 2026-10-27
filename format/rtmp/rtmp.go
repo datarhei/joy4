@@ -1427,7 +1427,8 @@ func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
 		data = tag.Data
 	}
 
-	flvTimestamp := uint32(ts & 0x7FFFFFFF)
+	// RTMP timestamps have 32 bits and wrap around at 2^32
+	flvTimestamp := uint32(ts)
 
 	actualChunkHeaderLength := chunkHeaderLength
 	if flvTimestamp >= maxFlvTimestamp {

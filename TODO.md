@@ -26,7 +26,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 ## C. Timestamp handling
 17. [x] **Drift on non-monotonic timestamps.** At `:1754-1762`, a backward step is ignored and the next forward step adds the full delta, so `xtimenow` drifts ahead. This hits encoders that mux audio and video on one csid, or that jitter. On wraparound, it adds `timenow` but loses `(max - prev)`.
 18. [x] **"Same timestamp" heuristic.** More than 10 equal or backward timestamps among the first 20 messages switch that csid to wall-clock time. This is per csid, so audio can be on wall clock while video keeps encoder time, which desyncs A/V, and the wall clock starts at connect time rather than at the stream's timestamp. After 20 messages, the same pattern drops the whole connection with an error.
-19. [ ] **Writer wraps at 2^31.** `writeAVTag` masks `ts & 0x7FFFFFFF`, while RTMP timestamps are 32-bit. Readers that unwrap at 2^32 jump after about 24.8 days.
+19. [x] **Writer wraps at 2^31.** `writeAVTag` masks `ts & 0x7FFFFFFF`, while RTMP timestamps are 32-bit. Readers that unwrap at 2^32 jump after about 24.8 days.
 
 ## D. Command / session layer
 20. [ ] **`OnPlayOrPublish` gets no stream info.** It receives only the command name and the connect params, and it runs before `conn.URL` is set (`:686` vs `:716`), so it cannot check the stream key. On rejection, the server still sends **`NetStream.Publish.Start`** and then closes. It should send `NetStream.Publish.BadName` or `Unauthorized` with level `error`.
