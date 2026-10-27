@@ -264,7 +264,8 @@ type Conn struct {
 
 	bufr *bufio.Reader
 	bufw *bufio.Writer
-	ackn uint32
+	ackn uint32 // received bytes since the last ack
+	acks uint32 // received bytes since the start of the session (sequence number of the ack)
 
 	writebuf []byte
 	readbuf  []byte
@@ -558,7 +559,7 @@ func (conn *Conn) pollMsg() (err error) {
 		}
 
 		if conn.readAckSize != 0 && conn.ackn > conn.readAckSize {
-			if err = conn.writeAck(conn.ackn, false); err != nil {
+			if err = conn.writeAck(conn.acks, false); err != nil {
 				return fmt.Errorf("writeACK: %w", err)
 			}
 			conn.flushWrite()
@@ -1851,6 +1852,7 @@ func (conn *Conn) readChunk() (err error) {
 	}
 
 	conn.ackn += uint32(n)
+	conn.acks += uint32(n)
 
 	return
 }
@@ -2152,6 +2154,7 @@ func (conn *Conn) handshakeClient() (err error) {
 	if _, err = io.ReadFull(conn.bufr, S0S1S2); err != nil {
 		return
 	}
+	conn.acks += uint32(len(S0S1S2))
 
 	if Debug {
 		fmt.Println("handshakeClient: server version", S1[4], S1[5], S1[6], S1[7])
@@ -2191,6 +2194,7 @@ func (conn *Conn) handshakeServer() (err error) {
 	if _, err = io.ReadFull(conn.bufr, C0C1); err != nil {
 		return
 	}
+	conn.acks += uint32(len(C0C1))
 	if C0[0] != 3 {
 		err = fmt.Errorf("handshake version=%d invalid", C0[0])
 		return
@@ -2229,6 +2233,7 @@ func (conn *Conn) handshakeServer() (err error) {
 	if _, err = io.ReadFull(conn.bufr, C2); err != nil {
 		return
 	}
+	conn.acks += uint32(len(C2))
 
 	conn.stage++
 	return

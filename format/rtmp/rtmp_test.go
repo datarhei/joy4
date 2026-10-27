@@ -318,3 +318,89 @@ func TestFillChunkHeaderExtendedTimestamp(t *testing.T) {
 		}
 	}
 }
+
+// readAcks returns the sequence numbers of all acks in the data.
+func readAcks(t *testing.T, data []byte) []uint32 {
+	acks := []uint32{}
+
+	for len(data) > 0 {
+		require.GreaterOrEqual(t, len(data), 16)
+		require.Equal(t, byte(0x02), data[0]) // type 0, csid 2
+		require.Equal(t, byte(msgtypeidAck), data[7])
+		require.Equal(t, uint32(4), pio.U24BE(data[4:]))
+		acks = append(acks, pio.U32BE(data[12:]))
+		data = data[16:]
+	}
+
+	return acks
+}
+
+// ackTestData returns count data messages of 1012 bytes each (12 bytes header, 1000 AMF0 null values).
+func ackTestData(count int) []byte {
+	data := []byte{}
+	for i := 0; i < count; i++ {
+		data = append(data, chunkMessage(3, 0, msgtypeidDataMsgAMF0, 0, bytes.Repeat([]byte{0x05}, 1000), 1000)...)
+	}
+	return data
+}
+
+func TestAckSequenceNumber(t *testing.T) {
+	conn := newReadConn(ackTestData(3))
+	buf := &bytes.Buffer{}
+	conn.bufw = bufio.NewWriter(buf)
+	conn.readMaxChunkSize = 1000
+	conn.readAckSize = 1000
+
+	for i := 0; i < 3; i++ {
+		err := conn.pollMsg()
+		require.NoError(t, err)
+	}
+
+	// the sequence number is the total of the received bytes, not the bytes since the last ack
+	require.Equal(t, []uint32{1012, 2024, 3036}, readAcks(t, buf.Bytes()))
+}
+
+func TestAckSequenceNumberWrap(t *testing.T) {
+	conn := newReadConn(ackTestData(2))
+	buf := &bytes.Buffer{}
+	conn.bufw = bufio.NewWriter(buf)
+	conn.readMaxChunkSize = 1000
+	conn.readAckSize = 1000
+	conn.acks = 0xFFFFFC00
+
+	for i := 0; i < 2; i++ {
+		err := conn.pollMsg()
+		require.NoError(t, err)
+	}
+
+	require.Equal(t, []uint32{0xFFFFFFF4, 0x3E8}, readAcks(t, buf.Bytes()))
+}
+
+func TestAckSequenceNumberHandshake(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	server := NewConn(c1)
+	server.isserver = true
+	client := NewConn(c2)
+
+	result := make(chan error, 1)
+
+	go func() {
+		result <- server.handshakeServer()
+	}()
+
+	err := client.handshakeClient()
+	require.NoError(t, err)
+	// C2 is written with the following commands
+	err = client.flushWrite()
+	require.NoError(t, err)
+
+	err = <-result
+	require.NoError(t, err)
+
+	// C0 + C1 + C2 and S0 + S1 + S2
+	require.Equal(t, uint32(1+1536+1536), server.acks)
+	require.Equal(t, uint32(1+1536+1536), client.acks)
+}
