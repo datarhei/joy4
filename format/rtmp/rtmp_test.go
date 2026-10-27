@@ -1374,3 +1374,31 @@ func TestAuthorizePublish(t *testing.T) {
 	require.Equal(t, "NetStream.Publish.BadName", info["code"])
 	require.Equal(t, "invalid token", info["description"])
 }
+
+func TestAuthorizePlay(t *testing.T) {
+	authorize := func(conn *Conn) error {
+		if !conn.IsPlaying() || conn.IsPublishing() {
+			return fmt.Errorf("not playing")
+		}
+		if conn.URL.Path != "/live/test" {
+			return fmt.Errorf("wrong path: %s", conn.URL.Path)
+		}
+		if conn.URL.Query().Get("token") != "secret" {
+			return fmt.Errorf("invalid token")
+		}
+		return nil
+	}
+
+	info, handled, err := authorizeTest(t, authorize, "/live/test?token=secret", false)
+	require.NoError(t, err)
+	require.True(t, handled)
+	require.Equal(t, "status", info["level"])
+	require.Equal(t, "NetStream.Play.Start", info["code"])
+
+	info, handled, err = authorizeTest(t, authorize, "/live/test?token=wrong", false)
+	require.ErrorContains(t, err, "play not authorized: invalid token")
+	require.False(t, handled)
+	require.Equal(t, "error", info["level"])
+	require.Equal(t, "NetStream.Play.StreamNotFound", info["code"])
+	require.Equal(t, "invalid token", info["description"])
+}

@@ -95,9 +95,9 @@ type Server struct {
 	HandlePlay    func(*Conn)
 	HandleConn    func(*Conn)
 
-	// HandleAuthorize is called when a client wants to publish a stream, before the server
-	// confirms it. conn.URL is set and IsPublishing reports true. If it returns an error, the
-	// client is rejected with the error as description of the status and the connection is closed.
+	// HandleAuthorize is called when a client wants to publish or play a stream, before the server
+	// confirms it. conn.URL is set and IsPublishing or IsPlaying reports true. If it returns an error,
+	// the client is rejected with the error as description of the status and the connection is closed.
 	HandleAuthorize func(conn *Conn) error
 
 	MaxProbePacketCount   int
@@ -863,6 +863,37 @@ func (conn *Conn) readConnect() (err error) {
 				}
 				playpath, _ := conn.commandparams[0].(string)
 
+				u, uerr := createURL(tcurl, connectpath, playpath)
+				if uerr != nil {
+					err = fmt.Errorf("invalid URL: %w", uerr)
+					return
+				}
+
+				conn.URL = u
+				conn.playing = true
+
+				if conn.authorize != nil {
+					if aerr := conn.authorize(conn); aerr != nil {
+						// > onStatus()
+						if err = conn.writeCommandMsg(false, 5, conn.avmsgsid,
+							"onStatus", conn.commandtransid, nil,
+							flvio.AMFMap{
+								"level":       "error",
+								"code":        "NetStream.Play.StreamNotFound",
+								"description": aerr.Error(),
+							},
+						); err != nil {
+							return
+						}
+						if err = conn.flushWrite(); err != nil {
+							return
+						}
+
+						err = fmt.Errorf("play not authorized: %w", aerr)
+						return
+					}
+				}
+
 				// > streamBegin(streamid)
 				if err = conn.writeStreamBegin(conn.avmsgsid, false); err != nil {
 					return
@@ -891,14 +922,6 @@ func (conn *Conn) readConnect() (err error) {
 					return
 				}
 
-				u, uerr := createURL(tcurl, connectpath, playpath)
-				if uerr != nil {
-					err = fmt.Errorf("invalid URL: %w", uerr)
-					return
-				}
-
-				conn.URL = u
-				conn.playing = true
 				conn.writing = true
 				conn.stage++
 				return
