@@ -402,7 +402,28 @@ type chunkStream struct {
 
 func (cs *chunkStream) Start() {
 	cs.msgdataleft = cs.msgdatalen
-	cs.msgdata = make([]byte, cs.msgdatalen)
+	cs.msgdata = nil
+}
+
+// grow extends the message data by n bytes and returns the new part. The buffer
+// grows with the data actually received, not with the announced message length,
+// such that a peer can't make us allocate memory without sending the data.
+func (cs *chunkStream) grow(n int) []byte {
+	l := len(cs.msgdata)
+	if cap(cs.msgdata)-l < n {
+		c := 2 * cap(cs.msgdata)
+		if c < l+n {
+			c = l + n
+		}
+		if c > int(cs.msgdatalen) {
+			c = int(cs.msgdatalen)
+		}
+		buf := make([]byte, l, c)
+		copy(buf, cs.msgdata)
+		cs.msgdata = buf
+	}
+	cs.msgdata = cs.msgdata[:l+n]
+	return cs.msgdata[l:]
 }
 
 const (
@@ -1689,8 +1710,7 @@ func (conn *Conn) readChunk() (err error) {
 	if size > conn.readMaxChunkSize {
 		size = conn.readMaxChunkSize
 	}
-	off := cs.msgdatalen - cs.msgdataleft
-	buf := cs.msgdata[off : int(off)+size]
+	buf := cs.grow(size)
 	if _, err = io.ReadFull(conn.bufr, buf); err != nil {
 		return
 	}
