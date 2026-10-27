@@ -1314,12 +1314,51 @@ func (conn *Conn) writeAMF0Msg(append bool, msgtypeid uint8, csid, msgsid uint32
 	}
 
 	b := conn.tmpwbuf(chunkHeaderLength + size)
-	n := conn.fillChunkHeader(append, b, csid, 0, msgtypeid, msgsid, size)
+	hdrlen := conn.fillChunkHeader(append, b, csid, 0, msgtypeid, msgsid, size)
+	n := hdrlen
 	for _, arg := range args {
 		n += flvio.FillAMF0Val(b[n:], arg)
 	}
 
-	_, err = conn.bufw.Write(b[:n])
+	return conn.writeChunks(b[:hdrlen], csid, 0, b[hdrlen:n])
+}
+
+// writeChunks writes a message as chunks of at most writeMaxChunkSize bytes. The first chunk
+// starts with the given chunk header, the following chunks start with a type 3 chunk header.
+// The message is the concatenation of the data.
+func (conn *Conn) writeChunks(header []byte, csid uint32, timestamp uint32, data ...[]byte) (err error) {
+	if _, err = conn.bufw.Write(header); err != nil {
+		return
+	}
+
+	var header3 [5]byte
+	chunksize := conn.writeMaxChunkSize
+	left := chunksize
+
+	for _, d := range data {
+		for len(d) > 0 {
+			if left == 0 {
+				n := conn.fillChunkHeader3(header3[:], csid, timestamp)
+				if _, err = conn.bufw.Write(header3[:n]); err != nil {
+					return
+				}
+				left = chunksize
+			}
+
+			n := len(d)
+			if n > left {
+				n = left
+			}
+
+			if _, err = conn.bufw.Write(d[:n]); err != nil {
+				return
+			}
+
+			d = d[n:]
+			left -= n
+		}
+	}
+
 	return
 }
 
@@ -1350,49 +1389,9 @@ func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
 	b := conn.tmpwbuf(actualChunkHeaderLength + flvio.MaxTagSubHeaderLength)
 	hdrlen := tag.FillHeader(b[actualChunkHeaderLength:])
 	conn.fillChunkHeader(false, b, csid, flvTimestamp, msgtypeid, conn.avmsgsid, hdrlen+len(data))
-	n := actualChunkHeaderLength + hdrlen
 
-	if _, err = conn.bufw.Write(b[:n]); err != nil {
+	if err = conn.writeChunks(b[:actualChunkHeaderLength], csid, flvTimestamp, b[actualChunkHeaderLength:actualChunkHeaderLength+hdrlen], data); err != nil {
 		return
-	}
-
-	chunksize := conn.writeMaxChunkSize
-	msgdataleft := len(data)
-
-	n = msgdataleft
-	if msgdataleft > chunksize-hdrlen {
-		n = chunksize - hdrlen
-	}
-
-	if _, err = conn.bufw.Write(data[:n]); err != nil {
-		return
-	}
-
-	data = data[n:]
-	msgdataleft -= n
-
-	for {
-		if msgdataleft == 0 {
-			break
-		}
-
-		n = conn.fillChunkHeader3(b, csid, flvTimestamp)
-
-		if _, err = conn.bufw.Write(b[:n]); err != nil {
-			return
-		}
-
-		n = msgdataleft
-		if msgdataleft > chunksize {
-			n = chunksize
-		}
-
-		if _, err = conn.bufw.Write(data[:n]); err != nil {
-			return
-		}
-
-		data = data[n:]
-		msgdataleft -= n
 	}
 
 	err = conn.bufw.Flush()

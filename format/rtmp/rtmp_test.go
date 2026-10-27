@@ -526,3 +526,127 @@ func TestHandshakeClientInvalidVersion(t *testing.T) {
 	_, _, err := handshakeClient(t, 6)
 	require.Error(t, err)
 }
+
+func TestWriteAVTagChunks(t *testing.T) {
+	// the tag header of an AVC NALU is 5 bytes, the payloads are 1005 and exactly 3 chunks
+	for _, datalen := range []int{1000, 3*128 - 5} {
+		data := make([]byte, datalen)
+		for i := range data {
+			data[i] = byte(i)
+		}
+
+		tag := flvio.Tag{
+			Type:          flvio.TAG_VIDEO,
+			FrameType:     flvio.FRAME_KEY,
+			CodecID:       flvio.VIDEO_H264,
+			AVCPacketType: flvio.AVC_NALU,
+			Data:          data,
+		}
+
+		conn, buf := newWriteConn()
+		conn.avmsgsid = 1
+
+		err := conn.writeAVTag(tag, 40)
+		require.NoError(t, err)
+
+		payload := append([]byte{0x17, 0x01, 0x00, 0x00, 0x00}, data...)
+		require.Equal(t, chunkMessage(7, 40, msgtypeidVideoMsg, 1, payload, 128), buf.Bytes(), "datalen %d", datalen)
+	}
+}
+
+func TestWriteAVTagChunkSizeSmallerThanTagHeader(t *testing.T) {
+	tag := flvio.Tag{
+		Type:          flvio.TAG_VIDEO,
+		FrameType:     flvio.FRAME_KEY,
+		CodecID:       flvio.VIDEO_H264,
+		AVCPacketType: flvio.AVC_NALU,
+		Data:          []byte{1, 2, 3},
+	}
+
+	conn, buf := newWriteConn()
+	conn.avmsgsid = 1
+	conn.writeMaxChunkSize = 1
+
+	err := conn.writeAVTag(tag, 40)
+	require.NoError(t, err)
+
+	payload := []byte{0x17, 0x01, 0x00, 0x00, 0x00, 1, 2, 3}
+	require.Equal(t, chunkMessage(7, 40, msgtypeidVideoMsg, 1, payload, 1), buf.Bytes())
+}
+
+func TestWriteDataMsgChunks(t *testing.T) {
+	// a single key, such that the encoding doesn't depend on the iteration order of the map
+	metadata := flvio.AMFMap{
+		"comment": string(bytes.Repeat([]byte{'x'}, 5000)),
+	}
+
+	conn, buf := newWriteConn()
+
+	err := conn.writeDataMsg(5, 1, "onMetaData", metadata)
+	require.NoError(t, err)
+	err = conn.flushWrite()
+	require.NoError(t, err)
+
+	payload := make([]byte, flvio.LenAMF0Val("onMetaData")+flvio.LenAMF0Val(metadata))
+	n := flvio.FillAMF0Val(payload, "onMetaData")
+	flvio.FillAMF0Val(payload[n:], metadata)
+
+	require.Greater(t, len(payload), conn.writeMaxChunkSize)
+	require.Equal(t, chunkMessage(5, 0, msgtypeidDataMsgAMF0, 1, payload, 128), buf.Bytes())
+
+	rconn := newReadConn(buf.Bytes())
+
+	err = rconn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, metadata, rconn.metadata)
+}
+
+func TestWriteDataMsgChunksReadBack(t *testing.T) {
+	metadata := flvio.AMFMap{
+		"width":   1280.0,
+		"height":  720.0,
+		"comment": string(bytes.Repeat([]byte{'x'}, 5000)),
+	}
+
+	conn, buf := newWriteConn()
+
+	err := conn.writeDataMsg(5, 1, "onMetaData", metadata)
+	require.NoError(t, err)
+	err = conn.flushWrite()
+	require.NoError(t, err)
+
+	rconn := newReadConn(buf.Bytes())
+
+	err = rconn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, metadata, rconn.metadata)
+}
+
+func TestWriteCommandMsgChunks(t *testing.T) {
+	description := string(bytes.Repeat([]byte{'y'}, 1000))
+
+	conn, buf := newWriteConn()
+
+	// type 0 chunk header
+	err := conn.writeCommandMsg(false, 3, 0, "_result", 1, nil, flvio.AMFMap{"description": description})
+	require.NoError(t, err)
+	// type 1 chunk header
+	err = conn.writeCommandMsg(true, 3, 0, "onStatus", 0, nil, flvio.AMFMap{"description": description})
+	require.NoError(t, err)
+	err = conn.flushWrite()
+	require.NoError(t, err)
+
+	rconn := newReadConn(buf.Bytes())
+
+	err = rconn.pollMsg()
+	require.NoError(t, err)
+	require.True(t, rconn.gotcommand)
+	require.Equal(t, "_result", rconn.commandname)
+	require.Equal(t, []interface{}{flvio.AMFMap{"description": description}}, rconn.commandparams)
+
+	err = rconn.pollMsg()
+	require.NoError(t, err)
+	require.True(t, rconn.gotcommand)
+	require.Equal(t, "onStatus", rconn.commandname)
+	require.Equal(t, []interface{}{flvio.AMFMap{"description": description}}, rconn.commandparams)
+}
