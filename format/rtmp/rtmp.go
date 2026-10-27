@@ -2129,18 +2129,20 @@ func (conn *Conn) handshakeClient() (err error) {
 
 	C0C1C2 := random[:1536*2+1]
 	C0 := C0C1C2[:1]
-	//C1 := C0C1C2[1:1536+1]
+	C1 := C0C1C2[1 : 1536+1]
 	C0C1 := C0C1C2[:1536+1]
-	var C2 []byte
 
 	S0S1S2 := random[1536*2+1:]
-	//S0 := S0S1S2[:1]
+	S0 := S0S1S2[:1]
 	S1 := S0S1S2[1 : 1536+1]
-	//S0S1 := S0S1S2[:1536+1]
-	//S2 := S0S1S2[1536+1:]
 
+	// C0: version, C1: time, zero, random bytes (simple handshake)
 	C0[0] = 3
-	//hsCreate01(C0C1, hsClientFullKey)
+	pio.PutU32BE(C1[0:4], uint32(time.Since(conn.start).Milliseconds()))
+	pio.PutU32BE(C1[4:8], 0)
+	if _, err = rand.Read(C1[8:]); err != nil {
+		return
+	}
 
 	// > C0C1
 	if _, err = conn.bufw.Write(C0C1); err != nil {
@@ -2156,18 +2158,17 @@ func (conn *Conn) handshakeClient() (err error) {
 	}
 	conn.acks += uint32(len(S0S1S2))
 
+	if S0[0] != 3 {
+		err = fmt.Errorf("handshake version=%d invalid", S0[0])
+		return
+	}
+
 	if Debug {
 		fmt.Println("handshakeClient: server version", S1[4], S1[5], S1[6], S1[7])
 	}
 
-	if ver := pio.U32BE(S1[4:8]); ver != 0 {
-		C2 = S1
-	} else {
-		C2 = S1
-	}
-
-	// > C2
-	if _, err = conn.bufw.Write(C2); err != nil {
+	// > C2: echo of S1
+	if _, err = conn.bufw.Write(S1); err != nil {
 		return
 	}
 

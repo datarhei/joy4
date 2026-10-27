@@ -457,3 +457,72 @@ func TestHandshakeServerSimple(t *testing.T) {
 	err = <-result
 	require.NoError(t, err)
 }
+
+// handshakeClient runs the client handshake against a server that answers with the given S0
+// and returns the received C0C1 and C2, and the error of the handshake.
+func handshakeClient(t *testing.T, S0 byte) ([]byte, []byte, error) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	client := NewConn(c1)
+
+	result := make(chan error, 1)
+
+	go func() {
+		err := client.handshakeClient()
+		if err == nil {
+			// C2 is written with the following commands
+			err = client.flushWrite()
+		}
+		result <- err
+	}()
+
+	C0C1 := make([]byte, 1+1536)
+	_, err := io.ReadFull(c2, C0C1)
+	require.NoError(t, err)
+
+	// S0 + S1 + S2 of a simple handshake
+	S0S1S2 := make([]byte, 1+1536+1536)
+	S0S1S2[0] = S0
+	S1 := S0S1S2[1 : 1+1536]
+	pio.PutU32BE(S1[0:4], 0x55667788)
+	for i := 8; i < len(S1); i++ {
+		S1[i] = byte(i * 3)
+	}
+	copy(S0S1S2[1+1536:], C0C1[1:])
+
+	_, err = c2.Write(S0S1S2)
+	require.NoError(t, err)
+
+	if S0 != 3 {
+		return C0C1, nil, <-result
+	}
+
+	C2 := make([]byte, 1536)
+	_, err = io.ReadFull(c2, C2)
+	require.NoError(t, err)
+
+	require.Equal(t, S1, C2)
+
+	return C0C1, C2, <-result
+}
+
+func TestHandshakeClientSimple(t *testing.T) {
+	C0C1, _, err := handshakeClient(t, 3)
+	require.NoError(t, err)
+
+	C0 := C0C1[0]
+	C1 := C0C1[1:]
+
+	require.Equal(t, byte(3), C0)
+
+	// C1 contains the time of the client, zero and random bytes
+	require.Equal(t, uint32(0), pio.U32BE(C1[4:8]))
+	require.NotEqual(t, make([]byte, 1528), C1[8:])
+}
+
+func TestHandshakeClientInvalidVersion(t *testing.T) {
+	_, _, err := handshakeClient(t, 6)
+	require.Error(t, err)
+}
