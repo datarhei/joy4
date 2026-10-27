@@ -421,6 +421,12 @@ func parseAMF0Val(b []byte, offset int) (val interface{}, n int, err error) {
 		count := int(pio.U32BE(b[n:]))
 		n += 4
 
+		// each value takes at least one byte (the marker)
+		if count > len(b)-n {
+			err = amf0ParseErr("strictarray.count", offset+n, err)
+			return
+		}
+
 		obj := make(AMFArray, count)
 		for i := 0; i < int(count); i++ {
 			var nval int
