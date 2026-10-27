@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"testing"
@@ -403,4 +404,56 @@ func TestAckSequenceNumberHandshake(t *testing.T) {
 	// C0 + C1 + C2 and S0 + S1 + S2
 	require.Equal(t, uint32(1+1536+1536), server.acks)
 	require.Equal(t, uint32(1+1536+1536), client.acks)
+}
+
+func TestHandshakeServerSimple(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	server := NewConn(c1)
+	server.isserver = true
+
+	result := make(chan error, 1)
+
+	go func() {
+		result <- server.handshakeServer()
+	}()
+
+	// C0 + C1 of a simple handshake (version 0)
+	C0C1 := make([]byte, 1+1536)
+	C0C1[0] = 3
+	C1 := C0C1[1:]
+	pio.PutU32BE(C1[0:4], 0x11223344)
+	pio.PutU32BE(C1[4:8], 0)
+	for i := 8; i < len(C1); i++ {
+		C1[i] = byte(i)
+	}
+
+	_, err := c2.Write(C0C1)
+	require.NoError(t, err)
+
+	S0S1S2 := make([]byte, 1+1536+1536)
+	_, err = io.ReadFull(c2, S0S1S2)
+	require.NoError(t, err)
+
+	S0 := S0S1S2[0]
+	S1 := S0S1S2[1 : 1+1536]
+	S2 := S0S1S2[1+1536:]
+
+	require.Equal(t, byte(3), S0)
+
+	// S1 contains the time of the server, zero and random bytes
+	require.Equal(t, uint32(0), pio.U32BE(S1[4:8]))
+	require.NotEqual(t, C1[8:], S1[8:])
+
+	// S2 is an exact echo of C1
+	require.Equal(t, C1, S2)
+
+	// C2 is an echo of S1
+	_, err = c2.Write(S1)
+	require.NoError(t, err)
+
+	err = <-result
+	require.NoError(t, err)
 }

@@ -2217,8 +2217,17 @@ func (conn *Conn) handshakeServer() (err error) {
 		hsCreate01(S0S1, srvtime, srvver, hsServerPartialKey)
 		hsCreate2(S2, digest)
 	} else {
-		copy(S1, C1)
-		copy(S2, C2)
+		// S1: time, zero, random bytes
+		now := uint32(time.Since(conn.start).Milliseconds())
+		pio.PutU32BE(S1[0:4], now)
+		pio.PutU32BE(S1[4:8], 0)
+		if _, err = rand.Read(S1[8:]); err != nil {
+			return
+		}
+
+		// S2: echo of C1. The spec wants the time C1 has been read in time2, but librtmp
+		// based clients (e.g. OBS) expect an exact copy of C1 and log a warning otherwise.
+		copy(S2, C1)
 	}
 
 	// > S0S1S2
