@@ -278,11 +278,18 @@ func FillAMF0Val(b []byte, _val interface{}) (n int) {
 	return
 }
 
+// MaxAMF0Depth is the maximum nesting depth of objects and arrays when parsing AMF0 values.
+const MaxAMF0Depth = 64
+
 func ParseAMF0Val(b []byte) (val interface{}, n int, err error) {
-	return parseAMF0Val(b, 0)
+	return parseAMF0Val(b, 0, 0)
 }
 
-func parseAMF0Val(b []byte, offset int) (val interface{}, n int, err error) {
+func parseAMF0Val(b []byte, offset int, depth int) (val interface{}, n int, err error) {
+	if depth > MaxAMF0Depth {
+		err = amf0ParseErr("depth", offset+n, err)
+		return
+	}
 	if len(b) < n+1 {
 		err = amf0ParseErr("marker", offset+n, err)
 		return
@@ -344,7 +351,7 @@ func parseAMF0Val(b []byte, offset int) (val interface{}, n int, err error) {
 
 			var nval int
 			var oval interface{}
-			if oval, nval, err = parseAMF0Val(b[n:], offset+n); err != nil {
+			if oval, nval, err = parseAMF0Val(b[n:], offset+n, depth+1); err != nil {
 				err = amf0ParseErr("object.val", offset+n, err)
 				return
 			}
@@ -391,7 +398,7 @@ func parseAMF0Val(b []byte, offset int) (val interface{}, n int, err error) {
 
 			var nval int
 			var oval interface{}
-			if oval, nval, err = parseAMF0Val(b[n:], offset+n); err != nil {
+			if oval, nval, err = parseAMF0Val(b[n:], offset+n, depth+1); err != nil {
 				err = amf0ParseErr("array.val", offset+n, err)
 				return
 			}
@@ -430,7 +437,7 @@ func parseAMF0Val(b []byte, offset int) (val interface{}, n int, err error) {
 		obj := make(AMFArray, count)
 		for i := 0; i < int(count); i++ {
 			var nval int
-			if obj[i], nval, err = parseAMF0Val(b[n:], offset+n); err != nil {
+			if obj[i], nval, err = parseAMF0Val(b[n:], offset+n, depth+1); err != nil {
 				err = amf0ParseErr("strictarray.val", offset+n, err)
 				return
 			}
