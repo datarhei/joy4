@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -1766,4 +1767,82 @@ func TestClientPlayOtherStatus(t *testing.T) {
 		require.NoError(t, err, "packet %d", i)
 		require.Equal(t, []byte{byte(i)}, pkt.Data, "packet %d", i)
 	}
+}
+
+func TestConcurrentReadWrite(t *testing.T) {
+	const count = 300
+
+	// ping requests from the peer, answered by the read path
+	pings := []byte{}
+	for i := 0; i < count; i++ {
+		payload := []byte{0x00, eventtypePingRequest, 0, 0, 0, 0}
+		pio.PutU32BE(payload[2:], uint32(i))
+		pings = append(pings, chunkMessage(2, 0, msgtypeidUserControl, 0, payload, 128)...)
+	}
+
+	conn := newReadConn(pings)
+	buf := &bytes.Buffer{}
+	conn.bufw = bufio.NewWriter(buf)
+	conn.avmsgsid = 1
+
+	data := make([]byte, 1000)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	tag := flvio.Tag{
+		Type:          flvio.TAG_VIDEO,
+		FrameType:     flvio.FRAME_KEY,
+		CodecID:       flvio.VIDEO_H264,
+		AVCPacketType: flvio.AVC_NALU,
+		Data:          data,
+	}
+
+	var wg sync.WaitGroup
+	var writeErr, readErr error
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < count && writeErr == nil; i++ {
+			writeErr = conn.writeAVTag(tag, int64(40*i))
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < count && readErr == nil; i++ {
+			readErr = conn.pollMsg()
+		}
+	}()
+
+	wg.Wait()
+
+	require.NoError(t, writeErr)
+	require.NoError(t, readErr)
+
+	// every message must be intact
+	rconn := newReadConn(buf.Bytes())
+	payload := append([]byte{0x17, 0x01, 0x00, 0x00, 0x00}, data...)
+	videos, responses := 0, map[uint32]bool{}
+
+	for {
+		err := rconn.pollMsg()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+
+		switch rconn.msgtypeid {
+		case msgtypeidVideoMsg:
+			require.Equal(t, payload, rconn.msgdata)
+			require.Equal(t, int64(40*videos), rconn.timestamp)
+			videos++
+		case msgtypeidUserControl:
+			require.Equal(t, uint16(eventtypePingResponse), rconn.eventtype)
+			responses[pio.U32BE(rconn.msgdata[2:])] = true
+		}
+	}
+
+	require.Equal(t, count, videos)
+	require.Equal(t, count, len(responses))
 }

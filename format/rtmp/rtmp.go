@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/datarhei/joy4/av"
@@ -286,6 +287,12 @@ type Conn struct {
 
 	bufr *bufio.Reader
 	bufw *bufio.Writer
+
+	// wlock serializes writing messages, such that the read path (e.g. acks, ping responses) and
+	// the write path (e.g. WritePacket) can run in different goroutines. It guards bufw, writebuf
+	// and writeMaxChunkSize.
+	wlock sync.Mutex
+
 	ackn uint32 // received bytes since the last ack
 	acks uint32 // received bytes since the start of the session (sequence number of the ack)
 
@@ -1427,6 +1434,9 @@ func (conn *Conn) tmpwbuf(n int) []byte {
 }
 
 func (conn *Conn) writeSetChunkSize(size int, append bool) (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	conn.writeMaxChunkSize = size
 	var b []byte
 	var n int
@@ -1440,6 +1450,9 @@ func (conn *Conn) writeSetChunkSize(size int, append bool) (err error) {
 }
 
 func (conn *Conn) writeAck(seqnum uint32, append bool) (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	var b []byte
 	var n int
 
@@ -1452,6 +1465,9 @@ func (conn *Conn) writeAck(seqnum uint32, append bool) (err error) {
 }
 
 func (conn *Conn) writeWindowAckSize(size uint32, append bool) (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	var b []byte
 	var n int
 
@@ -1467,6 +1483,9 @@ func (conn *Conn) writeWindowAckSize(size uint32, append bool) (err error) {
 }
 
 func (conn *Conn) writeSetPeerBandwidth(acksize uint32, limittype uint8, append bool) (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	var b []byte
 	var n int
 
@@ -1489,6 +1508,9 @@ func (conn *Conn) writeDataMsg(csid, msgsid uint32, args ...interface{}) (err er
 }
 
 func (conn *Conn) writeAMF0Msg(append bool, msgtypeid uint8, csid, msgsid uint32, args ...interface{}) (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	size := 0
 	for _, arg := range args {
 		size += flvio.LenAMF0Val(arg)
@@ -1548,6 +1570,9 @@ func (conn *Conn) writeChunks(header []byte, csid uint32, timestamp uint32, data
 }
 
 func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	var msgtypeid uint8
 	var csid uint32
 	var data []byte
@@ -1591,6 +1616,9 @@ func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
 }
 
 func (conn *Conn) writeStreamBegin(msgsid uint32, append bool) (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	b := conn.tmpwbuf(chunkHeaderLength + 6)
 	n := conn.fillChunkHeader(append, b, 2, 0, msgtypeidUserControl, 0, 6)
 	pio.PutU16BE(b[n:], eventtypeStreamBegin)
@@ -1602,6 +1630,9 @@ func (conn *Conn) writeStreamBegin(msgsid uint32, append bool) (err error) {
 }
 
 func (conn *Conn) writeSetBufferLength(msgsid uint32, timestamp uint32, append bool) (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	b := conn.tmpwbuf(chunkHeaderLength + 10)
 	n := conn.fillChunkHeader(append, b, 2, 0, msgtypeidUserControl, 0, 10)
 	pio.PutU16BE(b[n:], eventtypeSetBufferLength)
@@ -1615,6 +1646,9 @@ func (conn *Conn) writeSetBufferLength(msgsid uint32, timestamp uint32, append b
 }
 
 func (conn *Conn) writePingResponse(timestamp uint32, append bool) (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	b := conn.tmpwbuf(chunkHeaderLength + 10)
 	n := conn.fillChunkHeader(append, b, 2, 0, msgtypeidUserControl, 0, 6)
 	pio.PutU16BE(b[n:], eventtypePingResponse)
@@ -1705,6 +1739,9 @@ func (c *Conn) fillChunkHeader3(b []byte, csid uint32, timestamp uint32) (n int)
 }
 
 func (conn *Conn) flushWrite() (err error) {
+	conn.wlock.Lock()
+	defer conn.wlock.Unlock()
+
 	if err = conn.bufw.Flush(); err != nil {
 		return
 	}
