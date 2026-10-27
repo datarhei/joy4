@@ -719,3 +719,80 @@ func TestWriteDataMsgMaxMessageLength(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, buf.Len())
 }
+
+// chunkMessageExt splits the message into chunks of the given size, with an extended timestamp in
+// the type 0 chunk header. If repeat is true, the extended timestamp is repeated in the type 3 chunks.
+func chunkMessageExt(csid uint8, timestamp uint32, msgtypeid uint8, msgsid uint32, payload []byte, chunksize int, repeat bool) []byte {
+	data := chunkHeader0(csid, maxFlvTimestamp, len(payload), msgtypeid, msgsid)
+	data = append(data, 0, 0, 0, 0)
+	pio.PutU32BE(data[12:], timestamp)
+	for i := 0; i < len(payload); i += chunksize {
+		if i != 0 {
+			data = append(data, 0xc0|(csid&0x3f))
+			if repeat {
+				data = append(data, 0, 0, 0, 0)
+				pio.PutU32BE(data[len(data)-4:], timestamp)
+			}
+		}
+		end := i + chunksize
+		if end > len(payload) {
+			end = len(payload)
+		}
+		data = append(data, payload[i:end]...)
+	}
+	return data
+}
+
+// extTimestampPayloads returns two video messages of 200 bytes. The continuation chunk (at 128) of the
+// second message starts with the bytes of the extended timestamp.
+func extTimestampPayloads(ts2 uint32) ([]byte, []byte) {
+	payload1 := append([]byte{0x17, 0x01, 0x00, 0x00, 0x00}, bytes.Repeat([]byte{0xAA}, 195)...)
+	payload2 := append([]byte{0x17, 0x01, 0x00, 0x00, 0x00}, bytes.Repeat([]byte{0xBB}, 195)...)
+	pio.PutU32BE(payload2[128:], ts2)
+	return payload1, payload2
+}
+
+func TestReadChunkExtendedTimestampNotRepeated(t *testing.T) {
+	ts1, ts2 := uint32(0x01000000), uint32(0x01000028)
+	payload1, payload2 := extTimestampPayloads(ts2)
+
+	data := chunkMessageExt(6, ts1, msgtypeidVideoMsg, 1, payload1, 128, false)
+	data = append(data, chunkMessageExt(6, ts2, msgtypeidVideoMsg, 1, payload2, 128, false)...)
+	conn := newReadConn(data)
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, payload1, conn.msgdata)
+	require.Equal(t, int64(ts1), conn.timestamp)
+
+	// the data of the continuation chunk must not be taken as extended timestamp
+	err = conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, payload2, conn.msgdata)
+	require.Equal(t, int64(ts2), conn.timestamp)
+
+	require.Equal(t, uint32(len(data)), conn.acks)
+}
+
+func TestReadChunkExtendedTimestampRepeated(t *testing.T) {
+	ts1, ts2 := uint32(0x01000000), uint32(0x01000028)
+	payload1, payload2 := extTimestampPayloads(ts2)
+
+	data := chunkMessageExt(6, ts1, msgtypeidVideoMsg, 1, payload1, 128, true)
+	data = append(data, chunkMessageExt(6, ts2, msgtypeidVideoMsg, 1, payload2, 128, true)...)
+	conn := newReadConn(data)
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, payload1, conn.msgdata)
+	require.Equal(t, int64(ts1), conn.timestamp)
+
+	// only the repeated extended timestamp is skipped, not the data of the continuation chunk
+	err = conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, payload2, conn.msgdata)
+	require.Equal(t, int64(ts2), conn.timestamp)
+
+	// the skipped extended timestamps are counted
+	require.Equal(t, uint32(len(data)), conn.acks)
+}

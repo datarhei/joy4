@@ -431,6 +431,7 @@ type chunkStream struct {
 	timedelta        uint32
 	hastimeext       bool
 	timeext          uint32
+	timeextrepeat    int
 	msgsid           uint32
 	msgtypeid        uint8
 	msgdatalen       uint32
@@ -439,6 +440,12 @@ type chunkStream struct {
 	msgdata          []byte
 	msgcount         uint64
 }
+
+const (
+	timeextRepeatUnknown = iota // not yet known whether the peer repeats the extended timestamp in type 3 chunks
+	timeextRepeatYes
+	timeextRepeatNo
+)
 
 func (cs *chunkStream) Start() {
 	cs.msgdataleft = cs.msgdatalen
@@ -1739,6 +1746,7 @@ func (conn *Conn) readChunk() (err error) {
 					}
 					n += 4
 					timestamp = pio.U32BE(b)
+					cs.timeext = timestamp
 				} else {
 					timestamp = cs.timedelta
 				}
@@ -1747,17 +1755,23 @@ func (conn *Conn) readChunk() (err error) {
 			}
 			//fmt.Printf(", timenow = %d", cs.timenow)
 			cs.Start()
-		} else {
-			if cs.hastimeext {
-				var b []byte
-				if b, err = conn.bufr.Peek(4); err != nil {
+		} else if cs.hastimeext && cs.timeextrepeat != timeextRepeatNo {
+			// A continuation chunk of a message with an extended timestamp. It's not clear from the
+			// spec whether the extended timestamp is repeated in these chunks, some peers do (e.g. FFmpeg),
+			// others don't. Detect it in the first continuation chunk and stop looking for it if the peer
+			// doesn't repeat it, such that the beginning of the chunk data is not mistaken for it.
+			var p []byte
+			if p, err = conn.bufr.Peek(4); err != nil {
+				return
+			}
+			if pio.U32BE(p) == cs.timeext {
+				if _, err = conn.bufr.Discard(4); err != nil {
 					return
 				}
-				if pio.U32BE(b) == cs.timeext {
-					if _, err = io.ReadFull(conn.bufr, b[:4]); err != nil {
-						return
-					}
-				}
+				n += 4
+				cs.timeextrepeat = timeextRepeatYes
+			} else {
+				cs.timeextrepeat = timeextRepeatNo
 			}
 		}
 
