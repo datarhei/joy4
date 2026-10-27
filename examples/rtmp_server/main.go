@@ -130,7 +130,7 @@ func (s *server) handlePlay(conn *rtmp.Conn) {
 			filters = append(filters, &pktque.WaitKeyFrame{})
 		}
 
-		filters = append(filters, &pktque.FixTime{StartFromZero: false, MakeIncrement: false})
+		filters = append(filters, &pktque.FixTime{StartFromZero: true, MakeIncrement: false})
 
 		demuxer := &pktque.FilterDemuxer{
 			Filter:  filters,
