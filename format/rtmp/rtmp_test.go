@@ -92,3 +92,52 @@ func TestReadChunkEmptyMessage(t *testing.T) {
 	require.Equal(t, uint8(msgtypeidDataMsgAMF0), conn.msgtypeid)
 	require.Empty(t, conn.msgdata)
 }
+
+func setChunkSizeMessage(size uint32) []byte {
+	payload := make([]byte, 4)
+	pio.PutU32BE(payload, size)
+	return chunkMessage(2, 0, msgtypeidSetChunkSize, 0, payload, 128)
+}
+
+func TestSetChunkSize(t *testing.T) {
+	conn := newReadConn(setChunkSizeMessage(4096))
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, 4096, conn.readMaxChunkSize)
+}
+
+func TestSetChunkSizeInvalid(t *testing.T) {
+	for _, size := range []uint32{0, 0x80000000, 0xFFFFFFFF} {
+		conn := newReadConn(setChunkSizeMessage(size))
+
+		err := conn.pollMsg()
+		require.Error(t, err, "size %#x", size)
+		require.Equal(t, 128, conn.readMaxChunkSize, "size %#x", size)
+	}
+}
+
+func TestSetChunkSizeTooLarge(t *testing.T) {
+	conn := newReadConn(setChunkSizeMessage(0x7FFFFFFF))
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, 0xFFFFFF, conn.readMaxChunkSize)
+}
+
+func TestSetChunkSizeApplied(t *testing.T) {
+	// after a SetChunkSize of 1000, a 1000 byte message arrives in a single chunk
+	payload := []byte{0x17, 0x01, 0x00, 0x00, 0x00}
+	payload = append(payload, make([]byte, 995)...)
+
+	data := setChunkSizeMessage(1000)
+	data = append(data, chunkMessage(6, 0, msgtypeidVideoMsg, 1, payload, 1000)...)
+	conn := newReadConn(data)
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+
+	err = conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, payload, conn.msgdata)
+}

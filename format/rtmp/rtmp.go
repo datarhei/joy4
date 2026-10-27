@@ -1968,7 +1968,17 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 			err = fmt.Errorf("short packet of SetChunkSize")
 			return
 		}
-		conn.readMaxChunkSize = int(pio.U32BE(msgdata))
+		size := pio.U32BE(msgdata)
+		// the first bit must be 0 and the size must be at least 1
+		if size == 0 || size&0x80000000 != 0 {
+			err = fmt.Errorf("invalid SetChunkSize: %d", size)
+			return
+		}
+		// a chunk can't be bigger than the max. message length
+		if size > 0xFFFFFF {
+			size = 0xFFFFFF
+		}
+		conn.readMaxChunkSize = int(size)
 	case msgtypeidWindowAckSize:
 		if len(conn.msgdata) != 4 {
 			return fmt.Errorf("invalid packet of WindowAckSize")
