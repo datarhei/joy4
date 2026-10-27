@@ -931,3 +931,82 @@ func TestSetPeerBandwidthInvalid(t *testing.T) {
 	err := conn.pollMsg()
 	require.Error(t, err)
 }
+
+// chunkStreamsData returns one data message (an AMF0 null) on each of count chunk streams, starting with csid 3.
+func chunkStreamsData(count int) []byte {
+	data := []byte{}
+	for i := 0; i < count; i++ {
+		data = append(data, chunkMessage(uint8(3+i), 0, msgtypeidDataMsgAMF0, 0, []byte{0x05}, 128)...)
+	}
+	return data
+}
+
+func TestMaxChunkStreams(t *testing.T) {
+	conn := newReadConn(chunkStreamsData(DefaultMaxChunkStreams + 1))
+
+	for i := 0; i < DefaultMaxChunkStreams; i++ {
+		err := conn.pollMsg()
+		require.NoError(t, err, "chunk stream %d", i)
+	}
+
+	err := conn.pollMsg()
+	require.ErrorContains(t, err, "too many chunk streams")
+	require.Equal(t, DefaultMaxChunkStreams, len(conn.readcsmap))
+}
+
+func TestMaxChunkStreamsKnownChunkStream(t *testing.T) {
+	// more messages on already known chunk streams are fine
+	data := chunkStreamsData(DefaultMaxChunkStreams)
+	data = append(data, chunkStreamsData(DefaultMaxChunkStreams)...)
+	conn := newReadConn(data)
+
+	for i := 0; i < 2*DefaultMaxChunkStreams; i++ {
+		err := conn.pollMsg()
+		require.NoError(t, err, "message %d", i)
+	}
+}
+
+func TestMaxChunkStreamsConfigured(t *testing.T) {
+	conn := newReadConn(chunkStreamsData(5))
+	conn.maxChunkStreams = 4
+
+	for i := 0; i < 4; i++ {
+		err := conn.pollMsg()
+		require.NoError(t, err, "chunk stream %d", i)
+	}
+
+	err := conn.pollMsg()
+	require.ErrorContains(t, err, "max. 4 allowed")
+}
+
+func TestMaxChunkStreamsOptions(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c2.Close()
+
+	maxChunkStreams := make(chan int, 1)
+
+	server := &Server{
+		MaxChunkStreams: 4,
+		HandleConn: func(conn *Conn) {
+			maxChunkStreams <- conn.maxChunkStreams
+		},
+	}
+
+	err := server.HandleNetConn(c1)
+	require.NoError(t, err)
+	require.Equal(t, 4, <-maxChunkStreams)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	conn, err := Dial("rtmp://"+ln.Addr().String()+"/live/test", DialOptions{MaxChunkStreams: 5})
+	require.NoError(t, err)
+	defer conn.Close()
+	require.Equal(t, 5, conn.maxChunkStreams)
+
+	conn2, err := Dial("rtmp://"+ln.Addr().String()+"/live/test", DialOptions{})
+	require.NoError(t, err)
+	defer conn2.Close()
+	require.Equal(t, DefaultMaxChunkStreams, conn2.maxChunkStreams)
+}

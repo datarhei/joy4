@@ -20,7 +20,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 12. [x] **Messages over 16 MB are not checked.** `PutU24BE` silently truncates the length in `fillChunkHeader`.
 13. [x] **Type 3 continuation with extended timestamp.** At `:1670-1680`, the code peeks 4 bytes and guesses whether they are the extended timestamp. If the payload happens to start with those bytes, it desyncs. It also reads into bufio's own peek buffer (use `Discard(4)`), and those 4 bytes are not added to `n`, so the ack count is low.
 14. [x] **Unhandled control messages.** Abort (2) is not handled; it should drop the partial message on that csid. SetPeerBandwidth (6) is not answered with a WindowAckSize.
-15. [ ] **Limit of 16 chunk-stream ids** (`:1490`). This is a reasonable DoS guard but arbitrary. Some encoders use high csids. Make it configurable and document it.
+15. [x] **Fixed limit of 16 chunk streams** (`readChunk`). A reasonable DoS guard, but hard-coded, and the new chunk stream was added before the check. The limit counts different chunk stream ids in use, not how high they are (FFmpeg, OBS and joy4 use about 3–8). Make it configurable and document it.
 16. [ ] **Type 3 starting a new message after type 0** keeps the same absolute timestamp (delta 0). FFmpeg/SRS add the previous timestamp field as the delta instead. This interop gap feeds the "same timestamp" heuristic in #18.
 
 ## C. Timestamp handling

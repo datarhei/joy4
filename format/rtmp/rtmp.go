@@ -35,6 +35,9 @@ func ParseURL(uri string) (u *url.URL, err error) {
 	return
 }
 
+// DefaultMaxChunkStreams is the default max. number of chunk streams a peer can use.
+const DefaultMaxChunkStreams = 16
+
 // DefaultSetupTimeout is the default time for the handshake and the connect, publish or play
 // commands until a connection must be ready for publishing or playing.
 const DefaultSetupTimeout = 10 * time.Second
@@ -46,6 +49,9 @@ type DialOptions struct {
 	// SetupTimeout is the max. time for the setup of the connection (handshake and commands).
 	// 0 is DefaultSetupTimeout, a negative value disables the timeout.
 	SetupTimeout time.Duration
+
+	// MaxChunkStreams is the max. number of chunk streams the peer can use. 0 is DefaultMaxChunkStreams.
+	MaxChunkStreams int
 }
 
 func Dial(uri string, options DialOptions) (conn *Conn, err error) {
@@ -73,6 +79,9 @@ func DialTimeout(uri string, timeout time.Duration, options DialOptions) (conn *
 	if options.SetupTimeout != 0 {
 		conn.setupTimeout = options.SetupTimeout
 	}
+	if options.MaxChunkStreams > 0 {
+		conn.maxChunkStreams = options.MaxChunkStreams
+	}
 
 	return
 }
@@ -95,6 +104,9 @@ type Server struct {
 	// 0 is DefaultSetupTimeout, a negative value disables the timeout.
 	SetupTimeout time.Duration
 
+	// MaxChunkStreams is the max. number of chunk streams a peer can use. 0 is DefaultMaxChunkStreams.
+	MaxChunkStreams int
+
 	listener net.Listener
 	doneChan chan struct{}
 }
@@ -109,6 +121,9 @@ func (s *Server) HandleNetConn(netconn net.Conn) (err error) {
 	conn.netconn.SetIdleTimeout(s.ConnectionIdleTimeout)
 	if s.SetupTimeout != 0 {
 		conn.setupTimeout = s.SetupTimeout
+	}
+	if s.MaxChunkStreams > 0 {
+		conn.maxChunkStreams = s.MaxChunkStreams
 	}
 	conn.isserver = true
 
@@ -310,6 +325,8 @@ type Conn struct {
 
 	setupTimeout time.Duration
 
+	maxChunkStreams int
+
 	skipInvalidMessages bool
 
 	debugChunks bool
@@ -423,6 +440,7 @@ func NewConn(netconn net.Conn) *Conn {
 	conn.readbuf = make([]byte, 4096)
 	conn.start = time.Now()
 	conn.setupTimeout = DefaultSetupTimeout
+	conn.maxChunkStreams = DefaultMaxChunkStreams
 	return conn
 }
 
@@ -1584,14 +1602,13 @@ func (conn *Conn) readChunk() (err error) {
 	newcs := false
 	cs := conn.readcsmap[csid]
 	if cs == nil {
+		if len(conn.readcsmap) >= conn.maxChunkStreams {
+			err = fmt.Errorf("too many chunk streams, max. %d allowed", conn.maxChunkStreams)
+			return
+		}
 		cs = &chunkStream{}
 		conn.readcsmap[csid] = cs
 		newcs = true
-	}
-
-	if len(conn.readcsmap) > 16 {
-		err = fmt.Errorf("too many chunk stream ids")
-		return
 	}
 
 	// critical timestamps: 4:39:00 (2^24 use of extended timestamp)
