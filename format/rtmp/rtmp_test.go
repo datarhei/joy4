@@ -796,3 +796,138 @@ func TestReadChunkExtendedTimestampRepeated(t *testing.T) {
 	// the skipped extended timestamps are counted
 	require.Equal(t, uint32(len(data)), conn.acks)
 }
+
+func abortMessage(csid uint32) []byte {
+	payload := make([]byte, 4)
+	pio.PutU32BE(payload, csid)
+	return chunkMessage(2, 0, msgtypeidAbort, 0, payload, 128)
+}
+
+func TestAbort(t *testing.T) {
+	aborted := append([]byte{0x17, 0x01, 0x00, 0x00, 0x00}, bytes.Repeat([]byte{0xAA}, 295)...)
+	payload := append([]byte{0x17, 0x01, 0x00, 0x00, 0x00}, bytes.Repeat([]byte{0xBB}, 195)...)
+
+	// only the first chunk of the aborted message
+	data := chunkMessage(6, 0, msgtypeidVideoMsg, 1, aborted, 128)[:12+128]
+	data = append(data, abortMessage(6)...)
+	data = append(data, chunkMessage(6, 40, msgtypeidVideoMsg, 1, payload, 128)...)
+
+	conn := newReadConn(data)
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, uint8(msgtypeidAbort), conn.msgtypeid)
+
+	err = conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, uint8(msgtypeidVideoMsg), conn.msgtypeid)
+	require.Equal(t, payload, conn.msgdata)
+	require.Equal(t, int64(40), conn.timestamp)
+}
+
+func TestAbortType3(t *testing.T) {
+	aborted := append([]byte{0x17, 0x01, 0x00, 0x00, 0x00}, bytes.Repeat([]byte{0xAA}, 295)...)
+	payload := append([]byte{0x17, 0x01, 0x00, 0x00, 0x00}, bytes.Repeat([]byte{0xBB}, 295)...)
+
+	// only the first chunk of the aborted message
+	data := chunkMessage(6, 0, msgtypeidVideoMsg, 1, aborted, 128)[:12+128]
+	data = append(data, abortMessage(6)...)
+	// a new message of the same length with type 3 chunk headers only
+	for i := 0; i < len(payload); i += 128 {
+		end := i + 128
+		if end > len(payload) {
+			end = len(payload)
+		}
+		data = append(data, 0xc6)
+		data = append(data, payload[i:end]...)
+	}
+
+	conn := newReadConn(data)
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, uint8(msgtypeidAbort), conn.msgtypeid)
+
+	err = conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, uint8(msgtypeidVideoMsg), conn.msgtypeid)
+	require.Equal(t, payload, conn.msgdata)
+}
+
+func TestAbortUnknownChunkStream(t *testing.T) {
+	conn := newReadConn(abortMessage(42))
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, uint8(msgtypeidAbort), conn.msgtypeid)
+}
+
+func setPeerBandwidthMessage(size uint32, limit uint8) []byte {
+	payload := make([]byte, 5)
+	pio.PutU32BE(payload, size)
+	payload[4] = limit
+	return chunkMessage(2, 0, msgtypeidSetPeerBandwidth, 0, payload, 128)
+}
+
+// readWindowAckSizes returns the window sizes of all WindowAckSize messages in the data.
+func readWindowAckSizes(t *testing.T, data []byte) []uint32 {
+	sizes := []uint32{}
+
+	for len(data) > 0 {
+		require.GreaterOrEqual(t, len(data), 16)
+		require.Equal(t, byte(0x02), data[0]) // type 0, csid 2
+		require.Equal(t, byte(msgtypeidWindowAckSize), data[7])
+		sizes = append(sizes, pio.U32BE(data[12:]))
+		data = data[16:]
+	}
+
+	return sizes
+}
+
+func TestSetPeerBandwidth(t *testing.T) {
+	steps := []struct {
+		size   uint32
+		limit  uint8
+		answer []uint32
+	}{
+		{1000000, peerBWLimitDynamic, []uint32{}},        // no previous limit, ignored
+		{3000000, peerBWLimitSoft, []uint32{}},           // bigger than the current window
+		{1000000, peerBWLimitSoft, []uint32{1000000}},    // smaller than the current window
+		{4000000, peerBWLimitHard, []uint32{4000000}},    // always applied
+		{4000000, peerBWLimitHard, []uint32{}},           // unchanged
+		{5000000, peerBWLimitDynamic, []uint32{5000000}}, // previous limit was hard
+		{6000000, peerBWLimitSoft, []uint32{}},           // bigger than the current window
+		{1000000, peerBWLimitDynamic, []uint32{}},        // previous limit was soft, ignored
+	}
+
+	data := []byte{}
+	for _, step := range steps {
+		data = append(data, setPeerBandwidthMessage(step.size, step.limit)...)
+	}
+
+	conn := newReadConn(data)
+	buf := &bytes.Buffer{}
+	conn.bufw = bufio.NewWriter(buf)
+
+	// the window ack size sent with the basic configuration
+	err := conn.writeWindowAckSize(2500000, false)
+	require.NoError(t, err)
+	err = conn.flushWrite()
+	require.NoError(t, err)
+	buf.Reset()
+
+	for i, step := range steps {
+		err := conn.pollMsg()
+		require.NoError(t, err, "step %d", i)
+		require.Equal(t, uint8(msgtypeidSetPeerBandwidth), conn.msgtypeid, "step %d", i)
+		require.Equal(t, step.answer, readWindowAckSizes(t, buf.Bytes()), "step %d", i)
+		buf.Reset()
+	}
+}
+
+func TestSetPeerBandwidthInvalid(t *testing.T) {
+	conn := newReadConn(setPeerBandwidthMessage(1000000, 3))
+
+	err := conn.pollMsg()
+	require.Error(t, err)
+}

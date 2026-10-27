@@ -278,6 +278,10 @@ type Conn struct {
 	readAckSize       uint32
 	readcsmap         map[uint32]*chunkStream
 
+	writeAckSize   uint32 // the last window ack size sent to the peer
+	peerBWLimit    uint8  // the limit type of the last applied SetPeerBandwidth
+	peerBWLimitSet bool
+
 	isserver            bool
 	publishing, playing bool
 	reading, writing    bool
@@ -479,12 +483,19 @@ const (
 	msgtypeidWindowAckSize    = 5
 	msgtypeidSetPeerBandwidth = 6
 	msgtypeidSetChunkSize     = 1
+	msgtypeidAbort            = 2
 	msgtypeidCommandMsgAMF0   = 20
 	msgtypeidCommandMsgAMF3   = 17
 	msgtypeidDataMsgAMF0      = 18
 	msgtypeidDataMsgAMF3      = 15
 	msgtypeidVideoMsg         = 9
 	msgtypeidAudioMsg         = 8
+)
+
+const (
+	peerBWLimitHard    = 0
+	peerBWLimitSoft    = 1
+	peerBWLimitDynamic = 2
 )
 
 const (
@@ -1288,7 +1299,10 @@ func (conn *Conn) writeWindowAckSize(size uint32, append bool) (err error) {
 	n = conn.fillChunkHeader(append, b, 2, 0, msgtypeidWindowAckSize, 0, 4)
 	pio.PutU32BE(b[n:], size)
 	n += 4
-	_, err = conn.bufw.Write(b[:n])
+	if _, err = conn.bufw.Write(b[:n]); err != nil {
+		return
+	}
+	conn.writeAckSize = size
 	return
 }
 
@@ -2059,6 +2073,22 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 			return fmt.Errorf("invalid packet of WindowAckSize")
 		}
 		conn.readAckSize = pio.U32BE(conn.msgdata) >> 1
+	case msgtypeidAbort:
+		if len(msgdata) != 4 {
+			return fmt.Errorf("invalid packet of Abort")
+		}
+		// discard the partially received message of the chunk stream
+		if cs := conn.readcsmap[pio.U32BE(msgdata)]; cs != nil {
+			cs.msgdataleft = 0
+			cs.msgdata = nil
+		}
+	case msgtypeidSetPeerBandwidth:
+		if len(msgdata) != 5 {
+			return fmt.Errorf("invalid packet of SetPeerBandwidth")
+		}
+		if err = conn.handleSetPeerBandwidth(pio.U32BE(msgdata), msgdata[4]); err != nil {
+			return fmt.Errorf("SetPeerBandwidth: %w", err)
+		}
 	default:
 		if Debug {
 			fmt.Printf("rtmp: unhandled msg: %d\n", msgtypeid)
@@ -2067,6 +2097,43 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 
 	conn.gotmsg = true
 	return
+}
+
+// handleSetPeerBandwidth applies the window size from a SetPeerBandwidth message according to the
+// limit type and sends a WindowAckSize message to the peer if the window size changed.
+func (conn *Conn) handleSetPeerBandwidth(size uint32, limit uint8) error {
+	window := conn.writeAckSize
+
+	switch limit {
+	case peerBWLimitHard:
+		window = size
+	case peerBWLimitSoft:
+		if window == 0 || size < window {
+			window = size
+		}
+	case peerBWLimitDynamic:
+		// treated as hard if the previous limit was hard, otherwise ignored
+		if !conn.peerBWLimitSet || conn.peerBWLimit != peerBWLimitHard {
+			return nil
+		}
+		window = size
+		limit = peerBWLimitHard
+	default:
+		return fmt.Errorf("invalid limit type %d", limit)
+	}
+
+	conn.peerBWLimit = limit
+	conn.peerBWLimitSet = true
+
+	if window == conn.writeAckSize {
+		return nil
+	}
+
+	if err := conn.writeWindowAckSize(window, false); err != nil {
+		return err
+	}
+
+	return conn.flushWrite()
 }
 
 var (
