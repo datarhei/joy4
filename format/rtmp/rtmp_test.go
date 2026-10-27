@@ -1136,3 +1136,120 @@ func TestReadChunkTimestamps(t *testing.T) {
 		})
 	}
 }
+
+// avMessage returns an audio (AAC raw) or video (AVC NALU) message with a type 0 chunk header.
+func avMessage(msgtypeid uint8, timestamp uint32) []byte {
+	if msgtypeid == msgtypeidAudioMsg {
+		return chunkMessage(4, timestamp, msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, 0xAA}, 128)
+	}
+	return chunkMessage(6, timestamp, msgtypeidVideoMsg, 1, []byte{0x17, 0x01, 0x00, 0x00, 0x00, 0xAA}, 128)
+}
+
+type avTimestamp struct {
+	msgtypeid uint8
+	timestamp int64
+}
+
+// readAVTimestamps reads count messages and returns their types and timestamps.
+func readAVTimestamps(t *testing.T, conn *Conn, count int) []avTimestamp {
+	result := []avTimestamp{}
+	for i := 0; i < count; i++ {
+		err := conn.pollMsg()
+		require.NoError(t, err, "message %d", i)
+		result = append(result, avTimestamp{conn.msgtypeid, conn.timestamp})
+	}
+	return result
+}
+
+func TestWallclockTimeConstantTimestamps(t *testing.T) {
+	// video with increasing timestamps, audio with a constant timestamp
+	data := []byte{}
+	for i := 0; i < 15; i++ {
+		data = append(data, avMessage(msgtypeidVideoMsg, uint32(40*i))...)
+		data = append(data, avMessage(msgtypeidAudioMsg, 5000)...)
+	}
+
+	conn := newReadConn(data)
+	timestamps := readAVTimestamps(t, conn, 30)
+
+	require.True(t, conn.genwallclocktime)
+
+	// the 12th audio message has the 11th equal timestamp in a row and switches to wall clock time
+	switched := 2*11 + 1
+	for i, ts := range timestamps[:switched] {
+		if ts.msgtypeid == msgtypeidVideoMsg {
+			require.Equal(t, int64(40*(i/2)), ts.timestamp, "message %d", i)
+		} else {
+			require.Equal(t, int64(5000), ts.timestamp, "message %d", i)
+		}
+	}
+
+	// audio and video continue from the latest timestamp
+	prev := int64(5000)
+	for i, ts := range timestamps[switched:] {
+		require.GreaterOrEqual(t, ts.timestamp, prev, "message %d", switched+i)
+		require.Less(t, ts.timestamp, int64(5000+1000), "message %d", switched+i)
+		prev = ts.timestamp
+	}
+}
+
+func TestWallclockTimeThreshold(t *testing.T) {
+	// 11 messages with the same timestamp are 10 equal timestamps in a row
+	data := []byte{}
+	for i := 0; i < 11; i++ {
+		data = append(data, avMessage(msgtypeidVideoMsg, 1000)...)
+	}
+	data = append(data, avMessage(msgtypeidVideoMsg, 1040)...)
+
+	conn := newReadConn(data)
+	timestamps := readAVTimestamps(t, conn, 12)
+
+	require.False(t, conn.genwallclocktime)
+	require.Equal(t, int64(1040), timestamps[11].timestamp)
+
+	// one more is the 11th equal timestamp in a row
+	data = []byte{}
+	for i := 0; i < 12; i++ {
+		data = append(data, avMessage(msgtypeidVideoMsg, 1000)...)
+	}
+
+	conn = newReadConn(data)
+	readAVTimestamps(t, conn, 12)
+
+	require.True(t, conn.genwallclocktime)
+}
+
+func TestWallclockTimeStepsBackward(t *testing.T) {
+	// steps backward are not equal timestamps
+	data := []byte{}
+	for i := 0; i < 15; i++ {
+		data = append(data, avMessage(msgtypeidVideoMsg, uint32(1000-10*i))...)
+	}
+
+	conn := newReadConn(data)
+	timestamps := readAVTimestamps(t, conn, 15)
+
+	require.False(t, conn.genwallclocktime)
+	for i, ts := range timestamps {
+		require.Equal(t, int64(1000-10*i), ts.timestamp, "message %d", i)
+	}
+}
+
+func TestWallclockTimeDisconnect(t *testing.T) {
+	// after the first 20 messages, equal timestamps close the connection
+	data := []byte{}
+	for i := 0; i < 20; i++ {
+		data = append(data, avMessage(msgtypeidVideoMsg, uint32(40*i))...)
+	}
+	// the first one is a step forward, followed by 11 equal timestamps in a row
+	for i := 0; i < 12; i++ {
+		data = append(data, avMessage(msgtypeidVideoMsg, 800)...)
+	}
+
+	conn := newReadConn(data)
+	readAVTimestamps(t, conn, 31)
+
+	err := conn.pollMsg()
+	require.ErrorContains(t, err, "non-changing timestamps")
+	require.False(t, conn.genwallclocktime)
+}

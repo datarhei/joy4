@@ -323,6 +323,11 @@ type Conn struct {
 
 	start time.Time
 
+	// wall clock timestamps for audio and video, if the peer doesn't provide changing timestamps
+	genwallclocktime bool
+	wallclockbase    int64
+	wallclockstart   time.Time
+
 	setupTimeout time.Duration
 
 	maxChunkStreams int
@@ -445,23 +450,22 @@ func NewConn(netconn net.Conn) *Conn {
 }
 
 type chunkStream struct {
-	timenow          uint32
-	xtimenow         int64
-	prevtimenow      uint32
-	hasprevtimenow   bool
-	sametscount      int
-	genwallclocktime bool
-	timedelta        uint32
-	hastimeext       bool
-	timeext          uint32
-	timeextrepeat    int
-	msgsid           uint32
-	msgtypeid        uint8
-	msgdatalen       uint32
-	msgdataleft      uint32
-	msghdrtype       uint8
-	msgdata          []byte
-	msgcount         uint64
+	timenow        uint32
+	xtimenow       int64
+	prevtimenow    uint32
+	hasprevtimenow bool
+	sametscount    int
+	timedelta      uint32
+	hastimeext     bool
+	timeext        uint32
+	timeextrepeat  int
+	msgsid         uint32
+	msgtypeid      uint8
+	msgdatalen     uint32
+	msgdataleft    uint32
+	msghdrtype     uint8
+	msgdata        []byte
+	msgcount       uint64
 }
 
 const (
@@ -1824,7 +1828,7 @@ func (conn *Conn) readChunk() (err error) {
 			path = conn.URL.Path
 		}
 		data := fmt.Sprintf("%s: chunk id=%d msgsid=%d msgtypeid=%d msghdrtype=%d timestamp=%d ext=%v wallclock=%v len=%d left=%d max=%d",
-			path, csid, cs.msgsid, cs.msgtypeid, msghdrtype, cs.timenow, cs.hastimeext, cs.genwallclocktime, cs.msgdatalen, cs.msgdataleft, conn.readMaxChunkSize)
+			path, csid, cs.msgsid, cs.msgtypeid, msghdrtype, cs.timenow, cs.hastimeext, conn.genwallclocktime, cs.msgdatalen, cs.msgdataleft, conn.readMaxChunkSize)
 
 		if cs.msgtypeid != msgtypeidVideoMsg && cs.msgtypeid != msgtypeidAudioMsg {
 			if len(cs.msgdata) > 1024 {
@@ -1850,21 +1854,11 @@ func (conn *Conn) readChunk() (err error) {
 		timestamp = cs.timenow
 
 		if cs.msgtypeid == msgtypeidVideoMsg || cs.msgtypeid == msgtypeidAudioMsg {
-			if !cs.genwallclocktime {
-				if cs.prevtimenow >= cs.timenow {
+			if !conn.genwallclocktime {
+				if cs.hasprevtimenow && cs.prevtimenow == cs.timenow {
 					cs.sametscount++
 				} else {
 					cs.sametscount = 0
-				}
-
-				// if the previous timestamp is the same as the current for too often in a row, assume defect timestamps
-				if cs.sametscount > 10 {
-					if cs.msgcount < 20 { // only consider the first video and audio messages
-						cs.genwallclocktime = true
-					} else { // otherwise bail out
-						err = fmt.Errorf("detected sequence of non-changing timestamps: %d (msgtypeid %d)", cs.timenow, cs.msgtypeid)
-						return
-					}
 				}
 
 				if cs.hasprevtimenow {
@@ -1876,10 +1870,20 @@ func (conn *Conn) readChunk() (err error) {
 
 				cs.prevtimenow = cs.timenow
 				cs.msgcount++
+
+				// if the timestamp is the same as the previous one for too often in a row, assume defect timestamps
+				if cs.sametscount > 10 {
+					if cs.msgcount <= 20 { // only consider the first video and audio messages
+						conn.startWallclockTime()
+					} else { // otherwise bail out
+						err = fmt.Errorf("detected sequence of non-changing timestamps: %d (msgtypeid %d)", cs.timenow, cs.msgtypeid)
+						return
+					}
+				}
 			}
 
-			if cs.genwallclocktime {
-				cs.xtimenow = time.Since(conn.start).Milliseconds()
+			if conn.genwallclocktime {
+				cs.xtimenow = conn.wallclockbase + time.Since(conn.wallclockstart).Milliseconds()
 			}
 		}
 
@@ -1899,6 +1903,20 @@ func (conn *Conn) readChunk() (err error) {
 	conn.acks += uint32(n)
 
 	return
+}
+
+// startWallclockTime switches all audio and video chunk streams to wall clock timestamps. They
+// continue from the latest timestamp of the audio and video chunk streams.
+func (conn *Conn) startWallclockTime() {
+	conn.genwallclocktime = true
+	conn.wallclockstart = time.Now()
+	conn.wallclockbase = 0
+
+	for _, cs := range conn.readcsmap {
+		if cs.hasprevtimenow && cs.xtimenow > conn.wallclockbase {
+			conn.wallclockbase = cs.xtimenow
+		}
+	}
 }
 
 // maxTimestampStepBack is the max. step backward between two consecutive timestamps of a chunk stream that
