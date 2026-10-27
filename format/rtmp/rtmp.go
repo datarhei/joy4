@@ -1854,6 +1854,10 @@ func (conn *Conn) readChunk() (err error) {
 		timestamp = cs.timenow
 
 		if cs.msgtypeid == msgtypeidVideoMsg || cs.msgtypeid == msgtypeidAudioMsg {
+			// TODO: this whole wallclocktime hack was probably based on a
+			// that lead to identical timestamps caused by a specific sequence
+			// of packets, e.g. type 0 followed by type 3. So this might be
+			// removed later.
 			if !conn.genwallclocktime {
 				if cs.hasprevtimenow && cs.prevtimenow == cs.timenow {
 					cs.sametscount++
