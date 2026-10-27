@@ -269,7 +269,7 @@ func TestWriteAVTagExtendedTimestamp(t *testing.T) {
 		Data:          data,
 	}
 
-	for _, ts := range []int64{0, 0xFFFFFE, 0xFFFFFF, 0x1000000, 0x7FFFFF00} {
+	for _, ts := range []int64{0, 0xFFFFFE, 0xFFFFFF, 0x1000000, 0x7FFFFF00, 0x7FFFFFFF} {
 		wconn, buf := newWriteConn()
 		wconn.avmsgsid = 1
 
@@ -1072,5 +1072,67 @@ func TestReadChunkType3AfterType2(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, ts, conn.timestamp)
 		require.Equal(t, payload, conn.msgdata)
+	}
+}
+
+func TestTimestampDelta(t *testing.T) {
+	for _, tc := range []struct {
+		prev, now uint32
+		delta     int64
+	}{
+		{0, 40, 40},
+		{100, 90, -10},                    // small step backward
+		{90, 133, 43},                     // small step forward
+		{0, 2147479920, 2147479920},       // big step forward (sequence headers at 0)
+		{0x7FFFFFF0, 0x10, 0x20},          // wraparound at 2^31 (e.g. FFmpeg)
+		{0x7FFFFFF0, 0x80000010, 0x20},    // no wraparound at 2^31
+		{0x80000010, 0x7FFFFFF0, -0x20},   // backward over 2^31
+		{0xFFFFFFF0, 0x10, 0x20},          // wraparound at 2^32
+		{0x2000000, 0x1000001, -0xFFFFFF}, // the biggest step backward
+		{0x2000000, 0x1000000, 0},         // discontinuity
+		{1000000040, 20, 0},               // discontinuity (restarted timestamps)
+		{0x60000000, 0x10, 0},             // discontinuity, not a wraparound at 2^31
+		{0xC0000000, 0x10, 0},             // discontinuity, not a wraparound at 2^32
+	} {
+		require.Equal(t, tc.delta, timestampDelta(tc.prev, tc.now), "prev %#x now %#x", tc.prev, tc.now)
+	}
+}
+
+// videoMessages returns video messages with type 0 chunk headers with the given timestamps on the same chunk stream.
+func videoMessages(timestamps ...uint32) []byte {
+	payload := []byte{0x17, 0x01, 0x00, 0x00, 0x00, 0xAA}
+	data := []byte{}
+	for _, ts := range timestamps {
+		if ts >= maxFlvTimestamp {
+			data = append(data, chunkMessageExt(6, ts, msgtypeidVideoMsg, 1, payload, 128, false)...)
+		} else {
+			data = append(data, chunkMessage(6, ts, msgtypeidVideoMsg, 1, payload, 128)...)
+		}
+	}
+	return data
+}
+
+func TestReadChunkTimestamps(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		timestamps []uint32
+		expected   []int64
+	}{
+		{"non-monotonic", []uint32{100, 90, 133}, []int64{100, 90, 133}},
+		{"wraparound at 2^31", []uint32{0x7FFFFFF0, 0x10, 0x30}, []int64{0x7FFFFFF0, 0x80000010, 0x80000030}},
+		{"wraparound at 2^32", []uint32{0xFFFFFFF0, 0x10, 0x30}, []int64{0xFFFFFFF0, 0x100000010, 0x100000030}},
+		{"large first timestamp", []uint32{0x50000000, 0x50000028}, []int64{0x50000000, 0x50000028}},
+		{"sequence headers at 0 and wraparound at 2^31 (FFmpeg)", []uint32{0, 2147479920, 2147483640, 32}, []int64{0, 2147479920, 2147483640, 2147483680}},
+		{"discontinuity", []uint32{1000000000, 1000000040, 20, 60}, []int64{1000000000, 1000000040, 1000000040, 1000000080}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := newReadConn(videoMessages(tc.timestamps...))
+
+			for i, ts := range tc.expected {
+				err := conn.pollMsg()
+				require.NoError(t, err, "message %d", i)
+				require.Equal(t, ts, conn.timestamp, "message %d", i)
+			}
+		})
 	}
 }

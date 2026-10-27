@@ -448,6 +448,7 @@ type chunkStream struct {
 	timenow          uint32
 	xtimenow         int64
 	prevtimenow      uint32
+	hasprevtimenow   bool
 	sametscount      int
 	genwallclocktime bool
 	timedelta        uint32
@@ -1866,14 +1867,11 @@ func (conn *Conn) readChunk() (err error) {
 					}
 				}
 
-				if cs.prevtimenow > cs.timenow {
-					if cs.prevtimenow-cs.timenow > 0x3FFFFFFF {
-						// thats a wraparound (if bigger than 2^31 / 2)
-						//fmt.Printf(", wraparound!")
-						cs.xtimenow += int64(cs.timenow)
-					}
+				if cs.hasprevtimenow {
+					cs.xtimenow += timestampDelta(cs.prevtimenow, cs.timenow)
 				} else {
-					cs.xtimenow += int64(cs.timenow - cs.prevtimenow)
+					cs.xtimenow = int64(cs.timenow)
+					cs.hasprevtimenow = true
 				}
 
 				cs.prevtimenow = cs.timenow
@@ -1901,6 +1899,37 @@ func (conn *Conn) readChunk() (err error) {
 	conn.acks += uint32(n)
 
 	return
+}
+
+// maxTimestampStepBack is the max. step backward between two consecutive timestamps of a chunk stream that
+// is not considered a discontinuity. It is much bigger than any interleaving or jitter of the timestamps.
+const maxTimestampStepBack = 0x1000000
+
+// timestampDelta returns the difference between two consecutive timestamps of a chunk stream.
+//
+// Steps forward are taken as they are, also big ones (e.g. from the sequence headers at 0 to the first
+// frame). Small steps backward are kept (e.g. interleaved audio and video). A big step backward is a
+// wraparound if continuing over 2^31 (e.g. FFmpeg) or 2^32 leads to a small step forward. Otherwise it's
+// a discontinuity (e.g. the peer restarted its timestamps) and the timestamps continue without a gap.
+func timestampDelta(prev, now uint32) int64 {
+	if now >= prev {
+		return int64(now - prev)
+	}
+
+	if back := prev - now; back < maxTimestampStepBack {
+		return -int64(back)
+	}
+
+	wrap := int64(0x100000000)
+	if prev < 0x80000000 {
+		wrap = 0x80000000
+	}
+
+	if d := wrap - int64(prev) + int64(now); d < maxTimestampStepBack {
+		return d
+	}
+
+	return 0
 }
 
 func (conn *Conn) handleCommandMsgAMF0(b []byte) (n int, err error) {
