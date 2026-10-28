@@ -38,7 +38,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
     - [x] During playback nobody reads from the socket of the player, so closeStream, deleteStream, pause, acks and ping responses of players are never seen. Needs a read loop alongside WritePacket, see #43.
 25. [x] **Client does not handle errors.** `_error` replies to connect or createStream are ignored, so it loops until the peer closes. Transaction ids are not matched. The client doesn't wait for `NetStream.Publish.Start` or `Play.Start`, and it never surfaces `onStatus` errors (BadName, StreamNotFound, UnpublishNotify).
 26. [x] **Client publishing never reads.** Server pings are never answered and server acks and onStatus messages pile up. Some servers drop clients that don't answer pings.
-27. [ ] **Client details.** It sends SetPeerBandwidth (normally server-to-client only). SetBufferLength goes to msgsid 0 before the stream exists, so it has no effect. `publish` has no `"live"` argument, and `releaseStream`/`FCPublish` are not sent, which some CDNs require.
+27. [x] **Client details.** It sends SetPeerBandwidth (normally server-to-client only). SetBufferLength goes to msgsid 0 before the stream exists, so it has no effect. `publish` has no `"live"` argument, and `releaseStream`/`FCPublish` are not sent, which some CDNs require.
 28. [ ] **No RTMPS on the client side.** `Dial` is TCP only, and `ParseURL` always defaults to port 1935, with no `rtmps://` or port 443 handling. The server does have TLS.
 
 ## E. Enhanced RTMP v1 / FLV layer

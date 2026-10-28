@@ -1628,8 +1628,9 @@ func statusMessage(name string, transid float64, level, code, description string
 }
 
 var (
-	connectResult      = commandMessage("_result", 1.0, flvio.AMFMap{"fmsVer": "FMS/3,0,1,123"}, flvio.AMFMap{"level": "status", "code": "NetConnection.Connect.Success"})
-	createStreamResult = commandMessage("_result", 2.0, nil, 1.0)
+	connectResult             = commandMessage("_result", 1.0, flvio.AMFMap{"fmsVer": "FMS/3,0,1,123"}, flvio.AMFMap{"level": "status", "code": "NetConnection.Connect.Success"})
+	createStreamResult        = commandMessage("_result", 2.0, nil, 1.0) // of a player
+	createStreamResultPublish = commandMessage("_result", 4.0, nil, 1.0) // of a publisher
 )
 
 func concat(parts ...[]byte) []byte {
@@ -1652,15 +1653,15 @@ func TestClientCommandErrors(t *testing.T) {
 		), "command connect failed: NetConnection.Connect.Rejected (not allowed)"},
 		{"createStream _error", true, concat(
 			connectResult,
-			statusMessage("_error", 2.0, "error", "NetConnection.Call.Failed", ""),
+			statusMessage("_error", 4.0, "error", "NetConnection.Call.Failed", ""),
 		), "command createStream failed: NetConnection.Call.Failed"},
 		{"publish rejected", true, concat(
-			connectResult, createStreamResult,
+			connectResult, createStreamResultPublish,
 			statusMessage("onStatus", 0, "error", "NetStream.Publish.BadName", "invalid token"),
 		), "command publish failed: NetStream.Publish.BadName (invalid token)"},
 		{"publish _error", true, concat(
-			connectResult, createStreamResult,
-			statusMessage("_error", 3.0, "error", "NetConnection.Call.Failed", "no publish"),
+			connectResult, createStreamResultPublish,
+			statusMessage("_error", 5.0, "error", "NetConnection.Call.Failed", "no publish"),
 		), "command publish failed: NetConnection.Call.Failed (no publish)"},
 		{"play not found", false, concat(
 			connectResult, createStreamResult,
@@ -1689,7 +1690,10 @@ func TestClientCommandResults(t *testing.T) {
 		commandMessage("_result", 7.0, nil),
 		connectResult,
 		commandMessage("_error", 7.0, nil, flvio.AMFMap{"code": "NetConnection.Call.Failed"}),
-		createStreamResult,
+		// the answers to releaseStream and FCPublish
+		commandMessage("_result", 2.0, nil),
+		commandMessage("_result", 3.0, nil),
+		createStreamResultPublish,
 		statusMessage("onStatus", 0, "status", "NetStream.Publish.Start", "Start publishing"),
 	)
 
@@ -2046,4 +2050,105 @@ func TestServerPlayReadLoop(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		require.Fail(t, "the server didn't stop sending the stream")
 	}
+}
+
+type sentMessage struct {
+	msgtypeid uint8
+	name      string // command name
+	transid   float64
+	params    []interface{}
+	data      []byte
+}
+
+// clientMessages runs the setup of a client against the scripted server messages and returns what the client sent.
+func clientMessages(t *testing.T, data []byte, flags int) []sentMessage {
+	conn := newScriptedClient(t, data)
+	buf := &bytes.Buffer{}
+	conn.bufw = bufio.NewWriter(buf)
+
+	err := conn.prepare(stageCommandDone, flags)
+	require.NoError(t, err)
+
+	rconn := newReadConn(buf.Bytes())
+	messages := []sentMessage{}
+	for {
+		if err := rconn.pollMsg(); err != nil {
+			break
+		}
+		m := sentMessage{msgtypeid: rconn.msgtypeid, data: rconn.msgdata}
+		if rconn.gotcommand {
+			m.name, m.transid, m.params = rconn.commandname, rconn.commandtransid, rconn.commandparams
+		}
+		messages = append(messages, m)
+	}
+	return messages
+}
+
+func TestClientPublishCommands(t *testing.T) {
+	messages := clientMessages(t, concat(
+		connectResult, createStreamResultPublish,
+		statusMessage("onStatus", 0, "status", "NetStream.Publish.Start", ""),
+	), prepareWriting)
+
+	commands := []sentMessage{}
+	for _, m := range messages {
+		require.NotEqual(t, uint8(msgtypeidSetPeerBandwidth), m.msgtypeid, "a client doesn't send SetPeerBandwidth")
+		if m.name != "" {
+			commands = append(commands, sentMessage{name: m.name, transid: m.transid, params: m.params})
+		}
+	}
+
+	require.Equal(t, []sentMessage{
+		{name: "connect", transid: 1, params: []interface{}{}},
+		{name: "releaseStream", transid: 2, params: []interface{}{"test"}},
+		{name: "FCPublish", transid: 3, params: []interface{}{"test"}},
+		{name: "createStream", transid: 4, params: []interface{}{}},
+		{name: "publish", transid: 5, params: []interface{}{"test", "live"}},
+	}, commands)
+}
+
+func TestClientPlayCommands(t *testing.T) {
+	messages := clientMessages(t, concat(
+		connectResult, createStreamResult,
+		statusMessage("onStatus", 0, "status", "NetStream.Play.Start", ""),
+	), prepareReading)
+
+	names := []string{}
+	for _, m := range messages {
+		require.NotEqual(t, uint8(msgtypeidSetPeerBandwidth), m.msgtypeid, "a client doesn't send SetPeerBandwidth")
+		switch {
+		case m.name != "":
+			names = append(names, m.name)
+			if m.name == "play" {
+				require.Equal(t, 0.0, m.transid)
+				require.Equal(t, []interface{}{"test"}, m.params)
+			}
+		case m.msgtypeid == msgtypeidUserControl && pio.U16BE(m.data) == eventtypeSetBufferLength:
+			names = append(names, "SetBufferLength")
+			// for the created stream, 100 ms
+			require.Equal(t, uint32(1), pio.U32BE(m.data[2:]))
+			require.Equal(t, uint32(100), pio.U32BE(m.data[6:]))
+		}
+	}
+
+	require.Equal(t, []string{"connect", "createStream", "play", "SetBufferLength"}, names)
+}
+
+func TestCommandWithoutTransactionID(t *testing.T) {
+	// FFmpeg answers FCPublish with onFCPublish, without transaction id and command object
+	conn := newReadConn(concat(commandMessage("onFCPublish"), commandMessage("onBWDone", 0.0)))
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.True(t, conn.gotcommand)
+	require.Equal(t, "onFCPublish", conn.commandname)
+	require.Equal(t, 0.0, conn.commandtransid)
+	require.Nil(t, conn.commandobj)
+	require.Empty(t, conn.commandparams)
+
+	err = conn.pollMsg()
+	require.NoError(t, err)
+	require.True(t, conn.gotcommand)
+	require.Equal(t, "onBWDone", conn.commandname)
+	require.Nil(t, conn.commandobj)
 }

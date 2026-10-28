@@ -742,11 +742,11 @@ func (conn *Conn) writeBasicConf() (err error) {
 	if err = conn.writeWindowAckSize(2500000, false); err != nil {
 		return
 	}
-	// > SetPeerBandwidth
-	if err = conn.writeSetPeerBandwidth(2500000, 2, true); err != nil {
-		return
-	}
 	if conn.isserver {
+		// > SetPeerBandwidth, only sent by the server (as FFmpeg and librtmp do)
+		if err = conn.writeSetPeerBandwidth(2500000, 2, true); err != nil {
+			return
+		}
 		// > StreamBegin
 		if err = conn.writeStreamBegin(0, true); err != nil {
 			return
@@ -1170,23 +1170,29 @@ func (conn *Conn) connectPublish() (err error) {
 		return
 	}
 
-	transid := 2
+	// > releaseStream('path'), FCPublish('path'), as FFmpeg and OBS do. Their answers are not
+	// awaited, as not every server answers them (e.g. nginx-rtmp).
+	if err = conn.writeCommandMsg(false, 3, 0, "releaseStream", 2, nil, publishpath); err != nil {
+		return
+	}
+	if err = conn.writeCommandMsg(false, 3, 0, "FCPublish", 3, nil, publishpath); err != nil {
+		return
+	}
 
 	// > createStream()
 	if Debug {
 		fmt.Printf("rtmp: > createStream()\n")
 	}
-	if err = conn.writeCommandMsg(false, 3, 0, "createStream", transid, nil); err != nil {
+	if err = conn.writeCommandMsg(false, 3, 0, "createStream", 4, nil); err != nil {
 		return
 	}
-	transid++
 
 	if err = conn.flushWrite(); err != nil {
 		return
 	}
 
 	// < _result(avmsgsid) of createStream
-	if err = conn.waitResult("createStream", 2); err != nil {
+	if err = conn.waitResult("createStream", 4); err != nil {
 		return
 	}
 
@@ -1200,7 +1206,7 @@ func (conn *Conn) connectPublish() (err error) {
 	if Debug {
 		fmt.Printf("rtmp: > publish('%s')\n", publishpath)
 	}
-	if err = conn.writeCommandMsg(false, 8, conn.avmsgsid, "publish", transid, nil, publishpath); err != nil {
+	if err = conn.writeCommandMsg(false, 8, conn.avmsgsid, "publish", 5, nil, publishpath, "live"); err != nil {
 		return
 	}
 
@@ -1209,7 +1215,7 @@ func (conn *Conn) connectPublish() (err error) {
 	}
 
 	// < onStatus("NetStream.Publish.Start")
-	if err = conn.waitStatus("publish", float64(transid), "NetStream.Publish.Start"); err != nil {
+	if err = conn.waitStatus("publish", 5, "NetStream.Publish.Start"); err != nil {
 		return
 	}
 
@@ -1231,11 +1237,6 @@ func (conn *Conn) connectPlay() (err error) {
 		fmt.Printf("rtmp: > createStream()\n")
 	}
 	if err = conn.writeCommandMsg(false, 3, 0, "createStream", 2, nil); err != nil {
-		return
-	}
-
-	// > SetBufferLength 0,100ms
-	if err = conn.writeSetBufferLength(0, 100, false); err != nil {
 		return
 	}
 
@@ -1261,6 +1262,12 @@ func (conn *Conn) connectPlay() (err error) {
 	if err = conn.writeCommandMsg(false, 8, conn.avmsgsid, "play", 0, nil, playpath); err != nil {
 		return
 	}
+
+	// > SetBufferLength(avmsgsid, 100ms)
+	if err = conn.writeSetBufferLength(conn.avmsgsid, 100, false); err != nil {
+		return
+	}
+
 	if err = conn.flushWrite(); err != nil {
 		return
 	}
@@ -2213,14 +2220,19 @@ func (conn *Conn) handleCommandMsgAMF0(b []byte) (n int, err error) {
 		return
 	}
 	n += size
-	if transid, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
-		return
+	// the transaction id and the command object are optional, e.g. FFmpeg sends onFCPublish without them
+	if n < len(b) {
+		if transid, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
+			return
+		}
+		n += size
 	}
-	n += size
-	if obj, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
-		return
+	if n < len(b) {
+		if obj, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
+			return
+		}
+		n += size
 	}
-	n += size
 
 	var ok bool
 	if conn.commandname, ok = name.(string); !ok {
