@@ -2771,14 +2771,69 @@ func (conn *Conn) handshakeServer() (err error) {
 	return
 }
 
+// closeConn is the connection returned by serveOne. Closing it closes the connection and ends
+// its handler.
 type closeConn struct {
 	*Conn
-	waitclose chan bool
+	waitclose chan struct{}
+	closeOnce sync.Once
 }
 
-func (cc closeConn) Close() error {
-	cc.waitclose <- true
-	return nil
+func (cc *closeConn) Close() (err error) {
+	cc.closeOnce.Do(func() {
+		err = cc.Conn.Close()
+		close(cc.waitclose)
+	})
+	return
+}
+
+// serveOne serves on the listener until the first client plays (play is true) or publishes, and
+// returns that client. The listener is closed after the first client and further clients are
+// rejected. An error is returned if serving fails before.
+func serveOne(listener net.Listener, play bool) (*closeConn, error) {
+	var once sync.Once
+	waitconn := make(chan *closeConn, 1)
+	waitserve := make(chan error, 1)
+
+	handler := func(conn *Conn) {
+		cc := &closeConn{Conn: conn, waitclose: make(chan struct{})}
+		accepted := false
+		once.Do(func() {
+			accepted = true
+			waitconn <- cc
+			listener.Close()
+		})
+		if !accepted {
+			return
+		}
+		<-cc.waitclose
+	}
+
+	server := &Server{}
+	if play {
+		server.HandlePlay = handler
+	} else {
+		server.HandlePublish = handler
+	}
+
+	go func() {
+		waitserve <- server.Serve(listener)
+	}()
+
+	select {
+	case cc := <-waitconn:
+		return cc, nil
+	case err := <-waitserve:
+		// reject clients that are still connecting, unless one has been accepted just now
+		once.Do(func() {})
+		select {
+		case cc := <-waitconn:
+			return cc, nil
+		default:
+		}
+		server.Close()
+		return nil, err
+	}
 }
 
 func Handler(h *avutil.RegisterHandler) {
@@ -2800,44 +2855,30 @@ func Handler(h *avutil.RegisterHandler) {
 		return
 	}
 
+	listen := func(uri string) (listener net.Listener, err error) {
+		var u *url.URL
+		if u, err = ParseURL(uri); err != nil {
+			return
+		}
+		return net.Listen("tcp", u.Host)
+	}
+
 	h.ServerMuxer = func(uri string) (ok bool, muxer av.MuxCloser, err error) {
 		if !strings.HasPrefix(uri, "rtmp://") {
 			return
 		}
 		ok = true
 
-		var u *url.URL
-		if u, err = ParseURL(uri); err != nil {
-			return
-		}
-		server := &Server{
-			Addr: u.Host,
-		}
-
-		waitstart := make(chan error)
-		waitconn := make(chan *Conn)
-		waitclose := make(chan bool)
-
-		server.HandlePlay = func(conn *Conn) {
-			waitconn <- conn
-			<-waitclose
-		}
-
-		go func() {
-			waitstart <- server.ListenAndServe()
-		}()
-
-		select {
-		case err = <-waitstart:
-			if err != nil {
-				return
-			}
-
-		case conn := <-waitconn:
-			muxer = closeConn{Conn: conn, waitclose: waitclose}
+		var listener net.Listener
+		if listener, err = listen(uri); err != nil {
 			return
 		}
 
+		var conn *closeConn
+		if conn, err = serveOne(listener, true); err != nil {
+			return
+		}
+		muxer = conn
 		return
 	}
 
@@ -2847,38 +2888,16 @@ func Handler(h *avutil.RegisterHandler) {
 		}
 		ok = true
 
-		var u *url.URL
-		if u, err = ParseURL(uri); err != nil {
-			return
-		}
-		server := &Server{
-			Addr: u.Host,
-		}
-
-		waitstart := make(chan error)
-		waitconn := make(chan *Conn)
-		waitclose := make(chan bool)
-
-		server.HandlePublish = func(conn *Conn) {
-			waitconn <- conn
-			<-waitclose
-		}
-
-		go func() {
-			waitstart <- server.ListenAndServe()
-		}()
-
-		select {
-		case err = <-waitstart:
-			if err != nil {
-				return
-			}
-
-		case conn := <-waitconn:
-			demuxer = closeConn{Conn: conn, waitclose: waitclose}
+		var listener net.Listener
+		if listener, err = listen(uri); err != nil {
 			return
 		}
 
+		var conn *closeConn
+		if conn, err = serveOne(listener, false); err != nil {
+			return
+		}
+		demuxer = conn
 		return
 	}
 

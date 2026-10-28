@@ -15,11 +15,13 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/format/flv"
 	"github.com/datarhei/joy4/format/flv/flvio"
@@ -2612,4 +2614,111 @@ func TestClientCloseOtherConnections(t *testing.T) {
 			require.Equal(t, 0, buf.Len())
 		})
 	}
+}
+
+func TestServeOne(t *testing.T) {
+	for _, play := range []bool{false, true} {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		url := "rtmp://" + ln.Addr().String() + "/live/test"
+
+		goroutines := runtime.NumGoroutine()
+
+		served := make(chan *closeConn, 1)
+		go func() {
+			conn, err := serveOne(ln, play)
+			if err != nil {
+				served <- nil
+				return
+			}
+			served <- conn
+		}()
+
+		dial := func() (*Conn, error) {
+			conn, err := Dial(url, DialOptions{})
+			if err != nil {
+				return nil, err
+			}
+			if play {
+				_, err = conn.Streams()
+			} else {
+				stream, _ := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+				err = conn.WriteHeader([]av.CodecData{stream})
+			}
+			return conn, err
+		}
+
+		// the first client is returned
+		var client *Conn
+		if play {
+			// the client waits for the stream info, the server sends it after it has been returned
+			clients := make(chan *Conn, 1)
+			go func() {
+				conn, _ := dial()
+				clients <- conn
+			}()
+			conn := <-served
+			require.NotNil(t, conn, "play %v", play)
+			stream, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+			require.NoError(t, err)
+			require.NoError(t, conn.WriteHeader([]av.CodecData{stream}))
+			client = <-clients
+			require.NotNil(t, client)
+			served <- conn
+		} else {
+			client, err = dial()
+			require.NoError(t, err)
+		}
+		conn := <-served
+		require.NotNil(t, conn, "play %v", play)
+
+		// further clients are rejected
+		second, err := dial()
+		require.Error(t, err, "play %v", play)
+		if second != nil {
+			second.Close()
+		}
+
+		// closing the returned connection ends it, a second close doesn't block
+		require.NoError(t, conn.Close())
+		conn.Close()
+		client.Close()
+
+		// nothing is left running (not with require.Eventually, it runs the condition in a goroutine)
+		deadline := time.Now().Add(5 * time.Second)
+		for runtime.NumGoroutine() > goroutines && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		require.LessOrEqual(t, runtime.NumGoroutine(), goroutines, "play %v", play)
+	}
+}
+
+func TestServeOneServeError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	// Serve fails at the first Accept
+	ln.Close()
+
+	conn, err := serveOne(ln, false)
+	require.Error(t, err)
+	require.Nil(t, conn)
+}
+
+func TestHandlerServerListenError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	h := &avutil.RegisterHandler{}
+	Handler(h)
+
+	ok, demuxer, err := h.ServerDemuxer("rtmp://" + ln.Addr().String() + "/live/test")
+	require.True(t, ok)
+	require.Error(t, err)
+	require.Nil(t, demuxer)
+
+	ok, muxer, err := h.ServerMuxer("rtmp://" + ln.Addr().String() + "/live/test")
+	require.True(t, ok)
+	require.Error(t, err)
+	require.Nil(t, muxer)
 }
