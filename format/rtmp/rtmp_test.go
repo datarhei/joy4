@@ -2326,6 +2326,13 @@ func TestByteCountersConcurrent(t *testing.T) {
 
 		for {
 			if _, err := s.ReadPacket(); err != nil {
+				break
+			}
+		}
+
+		// read the rest (e.g. deleteStream) until the client closes the connection
+		for {
+			if err := s.pollMsg(); err != nil {
 				serverRx, serverTx = s.RxBytes(), s.TxBytes()
 				return nil
 			}
@@ -2349,8 +2356,8 @@ func TestByteCountersConcurrent(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	clientTx := conn.TxBytes()
 	conn.Close()
+	clientTx := conn.TxBytes()
 
 	require.NoError(t, <-result)
 	close(done)
@@ -2528,5 +2535,81 @@ func TestServerCloseActiveConnections(t *testing.T) {
 		require.Error(t, err)
 	case <-time.After(5 * time.Second):
 		require.Fail(t, "the client didn't notice the closed connection")
+	}
+}
+
+func TestClientCloseEndsStream(t *testing.T) {
+	commands := make(chan []string, 1)
+
+	url, result := publishServer(t, func(s *Conn) error {
+		npkts := 0
+		for {
+			if _, err := s.ReadPacket(); err != nil {
+				if !errors.Is(err, io.EOF) || !s.ended {
+					return fmt.Errorf("the stream didn't end with a command: %w", err)
+				}
+				break
+			}
+			npkts++
+		}
+		if npkts != 3 {
+			return fmt.Errorf("got %d packets", npkts)
+		}
+
+		// the command that ended the stream and the following ones
+		names := []string{s.commandname}
+		for {
+			if err := s.pollMsg(); err != nil {
+				break
+			}
+			if s.gotcommand {
+				names = append(names, s.commandname)
+			}
+		}
+		commands <- names
+		return nil
+	})
+
+	conn, err := Dial(url, DialOptions{})
+	require.NoError(t, err)
+
+	stream, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	err = conn.WriteHeader([]av.CodecData{stream})
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		err = conn.WritePacket(av.Packet{Idx: 0, Data: []byte{byte(i)}, Time: int64(23 * i)})
+		require.NoError(t, err)
+	}
+
+	conn.Close()
+	// a second Close doesn't send anything anymore
+	conn.Close()
+
+	require.NoError(t, <-result)
+	require.Equal(t, []string{"FCUnpublish", "deleteStream"}, <-commands)
+}
+
+func TestClientCloseOtherConnections(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		publishing bool
+		stage      int
+	}{
+		{"playing", false, stageCommandDone},
+		{"publishing before setup", true, stageHandshakeDone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := newScriptedClient(t, nil)
+			buf := &bytes.Buffer{}
+			conn.bufw = bufio.NewWriter(buf)
+			conn.publishing = tc.publishing
+			conn.playing = !tc.publishing
+			conn.stage = tc.stage
+
+			conn.Close()
+			require.Equal(t, 0, buf.Len())
+		})
 	}
 }

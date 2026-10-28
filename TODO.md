@@ -73,7 +73,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
    - `writeAVTag` gives csid 0 to non-A/V tags.
    - `SplitPath` puts everything after the first segment into the stream name (`app/instance` ambiguity).
    - There are no unit tests in `format/rtmp`.
-48. [ ] **Publishing client doesn't end the stream on Close.** `Conn.Close` of a publishing client only closes the TCP connection, without sending `FCUnpublish` and `deleteStream` first as FFmpeg and OBS do. A receiver sees a broken connection instead of the end of the stream (FFmpeg reports "Error during demuxing: Input/output error").
+48. [x] **Publishing client doesn't end the stream on Close.** `Conn.Close` of a publishing client only closes the TCP connection, without sending `FCUnpublish` and `deleteStream` first as FFmpeg and OBS do. A server that reacts to these commands (e.g. joy4 since #24) sees a broken connection instead of the end of the stream. (FFmpeg as receiver with `-listen 1` reports "Error during demuxing: Input/output error" for every publisher, also for FFmpeg itself, as it doesn't handle these commands in listen mode.)
 49. [ ] **Expired example certificate.** `examples/rtmp_server/cert.pem` expired in January 2022 and has no subject alternative names, so modern clients reject it. Replace it, or generate a certificate on the fly for the example.
 
 ## H. Other packages

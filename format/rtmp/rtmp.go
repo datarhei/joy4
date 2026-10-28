@@ -396,6 +396,9 @@ type Conn struct {
 	reading, writing    bool
 	stage               int
 
+	// ends the stream of a publishing client once on Close
+	unpublishOnce sync.Once
+
 	// the error of the read loop while writing the stream
 	readLoopLock sync.Mutex
 	readLoopErr  error
@@ -687,7 +690,30 @@ func (conn *Conn) IsPlaying() bool {
 	return conn.playing
 }
 
+// Close closes the connection. A publishing client ends the stream with FCUnpublish and deleteStream
+// before, as FFmpeg and OBS do, such that the server sees the end of the stream instead of a broken
+// connection.
 func (conn *Conn) Close() (err error) {
+	conn.unpublishOnce.Do(func() {
+		if conn.isserver || !conn.publishing || conn.stage < stageCommandDone {
+			return
+		}
+
+		_, publishpath := SplitPath(conn.URL)
+
+		// don't wait long for a peer that doesn't read anymore
+		conn.netconn.SetWriteIdleTimeout(time.Second)
+
+		// > FCUnpublish('path'), deleteStream(avmsgsid)
+		if err := conn.writeCommandMsg(false, 3, 0, "FCUnpublish", 6, nil, publishpath); err != nil {
+			return
+		}
+		if err := conn.writeCommandMsg(false, 3, 0, "deleteStream", 7, nil, conn.avmsgsid); err != nil {
+			return
+		}
+		conn.flushWrite()
+	})
+
 	return conn.netconn.Close()
 }
 
