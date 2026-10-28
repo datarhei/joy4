@@ -2361,3 +2361,43 @@ func TestByteCountersConcurrent(t *testing.T) {
 	require.Equal(t, clientTx, serverRx)
 	require.Greater(t, serverTx, uint64(0))
 }
+
+func TestDataMessageUnsupportedMarker(t *testing.T) {
+	// onMetaData with a reference, which is not supported
+	payload := make([]byte, flvio.LenAMF0Val("onMetaData"))
+	flvio.FillAMF0Val(payload, "onMetaData")
+	payload = append(payload, 0x03, 0x00, 0x01, 'a', 0x07, 0x00, 0x01, 0x00, 0x00, 0x09)
+
+	data := chunkMessage(4, 0, msgtypeidDataMsgAMF0, 1, payload, 128)
+	data = append(data, chunkMessage(4, 0, msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, 0xAA}, 128)...)
+
+	conn := newReadConn(data)
+
+	// the data message is dropped, the connection doesn't fail
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, uint8(msgtypeidDataMsgAMF0), conn.msgtypeid)
+	require.Nil(t, conn.datamsgvals)
+	require.Nil(t, conn.GetMetaData())
+
+	err = conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, uint8(msgtypeidAudioMsg), conn.msgtypeid)
+}
+
+func TestDataMessageTypedObject(t *testing.T) {
+	// onMetaData as typed object with the class name "Meta" and the property width
+	payload := make([]byte, flvio.LenAMF0Val("onMetaData"))
+	flvio.FillAMF0Val(payload, "onMetaData")
+	payload = append(payload, 0x10, 0x00, 0x04, 'M', 'e', 't', 'a', 0x00, 0x05, 'w', 'i', 'd', 't', 'h')
+	width := make([]byte, flvio.LenAMF0Val(1280.0))
+	flvio.FillAMF0Val(width, 1280.0)
+	payload = append(payload, width...)
+	payload = append(payload, 0x00, 0x00, 0x09)
+
+	conn := newReadConn(chunkMessage(4, 0, msgtypeidDataMsgAMF0, 1, payload, 128))
+
+	err := conn.pollMsg()
+	require.NoError(t, err)
+	require.Equal(t, flvio.AMFMap{"width": 1280.0}, conn.GetMetaData())
+}

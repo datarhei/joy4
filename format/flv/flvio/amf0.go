@@ -329,7 +329,22 @@ func parseAMF0Val(b []byte, offset int, depth int) (val interface{}, n int, err 
 		val = string(b[n : n+length])
 		n += length
 
-	case objectmarker:
+	case objectmarker, typedobjectmarker:
+		if marker == typedobjectmarker {
+			// the class name is followed by the properties as in an object, the class name is dropped
+			if len(b) < n+2 {
+				err = amf0ParseErr("typedobject.classname.length", offset+n, err)
+				return
+			}
+			length := int(pio.U16BE(b[n:]))
+			n += 2
+			if len(b) < n+length {
+				err = amf0ParseErr("typedobject.classname.body", offset+n, err)
+				return
+			}
+			n += length
+		}
+
 		obj := AMFMap{}
 		for {
 			if len(b) < n+2 {

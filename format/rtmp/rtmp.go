@@ -2333,17 +2333,17 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 		b := msgdata
 		n := 0
 		for n < len(b) {
-			var obj interface{}
-			var size int
-			if obj, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
-				return
+			obj, size, perr := flvio.ParseAMF0Val(b[n:])
+			if perr != nil {
+				// a data message (e.g. metadata) that can't be parsed is dropped, it doesn't fail the connection
+				if Debug {
+					fmt.Printf("rtmp: dropping data message: %s\n", perr.Error())
+				}
+				conn.datamsgvals = nil
+				break
 			}
 			n += size
 			conn.datamsgvals = append(conn.datamsgvals, obj)
-		}
-		if n < len(b) {
-			err = fmt.Errorf("DataMsgAMF0 left bytes=%d", len(b)-n)
-			return
 		}
 
 		// store metadata

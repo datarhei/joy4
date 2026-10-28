@@ -187,3 +187,43 @@ func TestAMF0UnsupportedType(t *testing.T) {
 		"after":   "ok",
 	}, amf0RoundTrip(t, val))
 }
+
+// typedObject returns an AMF0 typed object with the class name and a number property "a" with the value 1.
+func typedObject(class string) []byte {
+	b := []byte{typedobjectmarker, 0x00, byte(len(class))}
+	b = append(b, class...)
+	b = append(b, 0x00, 0x01, 'a')
+	num := make([]byte, lenAMF0Number)
+	fillAMF0Number(num, 1)
+	b = append(b, num...)
+	return append(b, 0x00, 0x00, objectendmarker)
+}
+
+func TestParseAMF0TypedObject(t *testing.T) {
+	b := typedObject("Foo")
+
+	val, n, err := ParseAMF0Val(b)
+	require.NoError(t, err)
+	require.Equal(t, len(b), n)
+	require.Equal(t, AMFMap{"a": 1.0}, val)
+
+	// nested in an object
+	nested := []byte{objectmarker, 0x00, 0x01, 't'}
+	nested = append(nested, typedObject("Bar")...)
+	nested = append(nested, 0x00, 0x00, objectendmarker)
+
+	val, n, err = ParseAMF0Val(nested)
+	require.NoError(t, err)
+	require.Equal(t, len(nested), n)
+	require.Equal(t, AMFMap{"t": AMFMap{"a": 1.0}}, val)
+
+	// truncated class name
+	_, _, err = ParseAMF0Val([]byte{typedobjectmarker, 0x00, 0x05, 'F', 'o'})
+	require.Error(t, err)
+}
+
+func TestParseAMF0Reference(t *testing.T) {
+	// references are not supported
+	_, _, err := ParseAMF0Val([]byte{referencemarker, 0x00, 0x01})
+	require.Error(t, err)
+}
