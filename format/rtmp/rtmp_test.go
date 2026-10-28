@@ -2826,3 +2826,81 @@ func TestWriteColorInfo(t *testing.T) {
 
 	require.NoError(t, <-result)
 }
+
+func TestConnectFourCC(t *testing.T) {
+	fourCcList := flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1"}
+	infoMap := flvio.AMFMap{"av01": 4.0, "vp09": 4.0, "hvc1": 4.0, "vvc1": 4.0}
+
+	for _, tc := range []struct {
+		name   string
+		params flvio.AMFMap
+		erTMP  bool
+	}{
+		{"legacy", flvio.AMFMap{}, false},
+		{"fourCcList", flvio.AMFMap{"fourCcList": flvio.AMFArray{"hvc1"}}, true},
+		{"videoFourCcInfoMap", flvio.AMFMap{"videoFourCcInfoMap": flvio.AMFMap{"*": 4.0}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"}
+			for k, v := range tc.params {
+				params[k] = v
+			}
+
+			conn := newReadConn(commandMessage("connect", 1.0, params))
+			buf := &bytes.Buffer{}
+			conn.bufw = bufio.NewWriter(buf)
+			conn.isserver = true
+			require.Nil(t, conn.ConnectParams())
+
+			err := conn.readConnect()
+			require.ErrorIs(t, err, io.EOF)
+			require.Equal(t, params, conn.ConnectParams())
+
+			// the properties in the answer of the server
+			rconn := newReadConn(buf.Bytes())
+			rconn.readMaxChunkSize = 65536
+			var properties flvio.AMFMap
+			for properties == nil {
+				err = rconn.pollMsg()
+				require.NoError(t, err)
+				if rconn.gotcommand && rconn.commandname == "_result" {
+					properties = rconn.commandobj
+				}
+			}
+
+			require.Equal(t, "FMS/3,0,1,123", properties["fmsVer"])
+			if tc.erTMP {
+				require.Equal(t, fourCcList, properties["fourCcList"])
+				require.Equal(t, infoMap, properties["videoFourCcInfoMap"])
+			} else {
+				require.NotContains(t, properties, "fourCcList")
+				require.NotContains(t, properties, "videoFourCcInfoMap")
+			}
+		})
+	}
+}
+
+func TestClientConnectFourCC(t *testing.T) {
+	conn := newScriptedClient(t, concat(
+		connectResult, createStreamResultPublish,
+		statusMessage("onStatus", 0, "status", "NetStream.Publish.Start", ""),
+	))
+	buf := &bytes.Buffer{}
+	conn.bufw = bufio.NewWriter(buf)
+
+	err := conn.prepare(stageCommandDone, prepareWriting)
+	require.NoError(t, err)
+
+	rconn := newReadConn(buf.Bytes())
+	var params flvio.AMFMap
+	for params == nil {
+		err := rconn.pollMsg()
+		require.NoError(t, err)
+		if rconn.gotcommand && rconn.commandname == "connect" {
+			params = rconn.commandobj
+		}
+	}
+
+	require.Equal(t, flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1"}, params["fourCcList"])
+	require.Equal(t, flvio.AMFMap{"av01": 4.0, "vp09": 4.0, "hvc1": 4.0, "vvc1": 4.0}, params["videoFourCcInfoMap"])
+}

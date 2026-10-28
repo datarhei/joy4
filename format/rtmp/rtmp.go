@@ -411,6 +411,9 @@ type Conn struct {
 	commandobj     flvio.AMFMap
 	commandparams  []interface{}
 
+	// the command object of the connect command
+	connectparams flvio.AMFMap
+
 	gotmsg      bool
 	timestamp   int64
 	msgdata     []byte
@@ -694,6 +697,12 @@ func (conn *Conn) IsPlaying() bool {
 	return conn.playing
 }
 
+// ConnectParams returns the command object of the connect command of the client, e.g. with the codecs it
+// supports (fourCcList, videoFourCcInfoMap). It is nil before the client has connected.
+func (conn *Conn) ConnectParams() flvio.AMFMap {
+	return conn.connectparams
+}
+
 // Close closes the connection. A publishing client ends the stream with FCUnpublish and deleteStream
 // before, as FFmpeg and OBS do, such that the server sees the end of the stream instead of a broken
 // connection.
@@ -849,6 +858,33 @@ func createURL(tcurl, app, play string) (*url.URL, error) {
 
 var CodecTypes = flv.CodecTypes
 
+// videoFourCCs are the FourCCs of the supported E-RTMP video codecs.
+var videoFourCCs = [][4]byte{flvio.FOURCC_AV1, flvio.FOURCC_VP9, flvio.FOURCC_HEVC, flvio.FOURCC_VVC}
+
+// fourCcCanForward is the flag of the FourCcInfoMask (E-RTMP v2) for a codec that can be forwarded. joy4
+// neither decodes nor encodes.
+const fourCcCanForward = 0x04
+
+// videoFourCcList returns the supported video codecs for the fourCcList property of the connect command
+// and its result (E-RTMP).
+func videoFourCcList() flvio.AMFArray {
+	list := flvio.AMFArray{}
+	for _, fourCC := range videoFourCCs {
+		list = append(list, string(fourCC[:]))
+	}
+	return list
+}
+
+// videoFourCcInfoMap returns the supported video codecs for the videoFourCcInfoMap property of the connect
+// command and its result (E-RTMP v2).
+func videoFourCcInfoMap() flvio.AMFMap {
+	infoMap := flvio.AMFMap{}
+	for _, fourCC := range videoFourCCs {
+		infoMap[string(fourCC[:])] = fourCcCanForward
+	}
+	return infoMap
+}
+
 func (conn *Conn) writeBasicConf() (err error) {
 	// > WindowAckSize
 	if err = conn.writeWindowAckSize(2500000, false); err != nil {
@@ -888,6 +924,7 @@ func (conn *Conn) readConnect() (err error) {
 	}
 
 	//fmt.Printf("readConnect: %+v\n", conn.commandobj)
+	conn.connectparams = conn.commandobj
 
 	var ok bool
 	var _app, _tcurl interface{}
@@ -909,12 +946,22 @@ func (conn *Conn) readConnect() (err error) {
 		return
 	}
 
+	properties := flvio.AMFMap{
+		"fmsVer":       "FMS/3,0,1,123",
+		"capabilities": 31,
+	}
+
+	// a client that supports E-RTMP gets the supported codecs (E-RTMP v2 recommends it)
+	_, hasFourCcList := conn.commandobj["fourCcList"]
+	_, hasVideoFourCcInfoMap := conn.commandobj["videoFourCcInfoMap"]
+	if hasFourCcList || hasVideoFourCcInfoMap {
+		properties["fourCcList"] = videoFourCcList()
+		properties["videoFourCcInfoMap"] = videoFourCcInfoMap()
+	}
+
 	// > _result("NetConnection.Connect.Success")
 	if err = conn.writeCommandMsg(false, 3, 0, "_result", conn.commandtransid,
-		flvio.AMFMap{
-			"fmsVer":       "FMS/3,0,1,123",
-			"capabilities": 31,
-		},
+		properties,
 		flvio.AMFMap{
 			"level":          "status",
 			"code":           "NetConnection.Connect.Success",
@@ -1175,15 +1222,16 @@ func (conn *Conn) writeConnect(path string) (err error) {
 	}
 	if err = conn.writeCommandMsg(false, 3, 0, "connect", 1,
 		flvio.AMFMap{
-			"app":           path,
-			"flashVer":      "MAC 22,0,0,192",
-			"tcUrl":         getTcUrl(conn.URL),
-			"fpad":          false,
-			"capabilities":  15,
-			"audioCodecs":   4071,
-			"videoCodecs":   252,
-			"videoFunction": 1,
-			"fourCcList":    flvio.AMFArray{"av01", "vp09", "hvc1"},
+			"app":                path,
+			"flashVer":           "MAC 22,0,0,192",
+			"tcUrl":              getTcUrl(conn.URL),
+			"fpad":               false,
+			"capabilities":       15,
+			"audioCodecs":        4071,
+			"videoCodecs":        252,
+			"videoFunction":      1,
+			"fourCcList":         videoFourCcList(),
+			"videoFourCcInfoMap": videoFourCcInfoMap(),
 		},
 	); err != nil {
 		return
