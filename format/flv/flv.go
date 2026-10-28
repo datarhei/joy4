@@ -87,6 +87,14 @@ type Prober struct {
 	MaxProbePacketCount            int
 	Streams                        []av.CodecData
 	CachedPkts                     []av.Packet
+
+	// the tags received while probing, converted to CachedPkts once probing is done
+	cachedTags []cachedTag
+}
+
+type cachedTag struct {
+	tag       flvio.Tag
+	timestamp int64
 }
 
 func NewProber(maxProbePacketCount int) *Prober {
@@ -97,9 +105,10 @@ func NewProber(maxProbePacketCount int) *Prober {
 	return prober
 }
 
-func (prober *Prober) CacheTag(_tag flvio.Tag, timestamp int64) {
-	pkt, _ := prober.TagToPacket(_tag, timestamp)
-	prober.CachedPkts = append(prober.CachedPkts, pkt)
+// CacheTag caches a tag while probing. It is converted to a packet once probing is done, such that it
+// gets the index of its stream even if it arrived before the sequence header of its stream.
+func (prober *Prober) CacheTag(tag flvio.Tag, timestamp int64) {
+	prober.cachedTags = append(prober.cachedTags, cachedTag{tag, timestamp})
 }
 
 func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
@@ -278,7 +287,61 @@ func (prober *Prober) Probed() (ok bool) {
 	return false
 }
 
+// tagCodecType returns the codec type of an audio or video tag.
+func tagCodecType(tag flvio.Tag) av.CodecType {
+	switch tag.Type {
+	case flvio.TAG_VIDEO:
+		if !tag.IsExHeader {
+			return av.H264
+		}
+		switch tag.FourCC {
+		case flvio.FOURCC_HEVC:
+			return av.HEVC
+		case flvio.FOURCC_VP9:
+			return av.VP9
+		case flvio.FOURCC_AV1:
+			return av.AV1
+		case flvio.FOURCC_VVC:
+			return av.VVC
+		}
+
+	case flvio.TAG_AUDIO:
+		switch tag.SoundFormat {
+		case flvio.SOUND_AAC:
+			return av.AAC
+		case flvio.SOUND_SPEEX:
+			return av.SPEEX
+		case flvio.SOUND_NELLYMOSER:
+			return av.NELLYMOSER
+		}
+	}
+
+	return 0
+}
+
+// TagToPacket converts an audio or video tag to a packet of the probed stream of its kind. If there's no
+// such stream, or the codec of the tag doesn't match the codec of the stream, it returns false.
 func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet, ok bool) {
+	var idx int
+	switch tag.Type {
+	case flvio.TAG_VIDEO:
+		if !prober.GotVideo {
+			return
+		}
+		idx = prober.VideoStreamIdx
+	case flvio.TAG_AUDIO:
+		if !prober.GotAudio {
+			return
+		}
+		idx = prober.AudioStreamIdx
+	default:
+		return
+	}
+
+	if idx >= len(prober.Streams) || prober.Streams[idx].Type() != tagCodecType(tag) {
+		return
+	}
+
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
 		pkt.Idx = int8(prober.VideoStreamIdx)
@@ -317,11 +380,28 @@ func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet
 	return
 }
 
+// convertCachedTags converts the tags cached while probing to packets, once probing is done.
+func (prober *Prober) convertCachedTags() {
+	if len(prober.cachedTags) == 0 || !prober.Probed() {
+		return
+	}
+
+	for _, c := range prober.cachedTags {
+		if pkt, ok := prober.TagToPacket(c.tag, c.timestamp); ok {
+			prober.CachedPkts = append(prober.CachedPkts, pkt)
+		}
+	}
+
+	prober.cachedTags = nil
+}
+
 func (prober *Prober) Empty() bool {
+	prober.convertCachedTags()
 	return len(prober.CachedPkts) == 0
 }
 
 func (prober *Prober) PopPacket() av.Packet {
+	prober.convertCachedTags()
 	pkt := prober.CachedPkts[0]
 	prober.CachedPkts = prober.CachedPkts[1:]
 	return pkt
