@@ -171,21 +171,21 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 						prober.Streams = append(prober.Streams, stream)
 						prober.GotVideo = true
 					}
-				} else if tag.FourCC == flvio.FOURCC_VVC {
-					if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
-						if !prober.GotVideo {
-							var stream vvcparser.CodecData
-							//fmt.Printf("got HEVC sequence start:\n%s\n", hex.Dump(tag.Data))
-							if stream, err = vvcparser.NewCodecDataFromVVCDecoderConfRecord(tag.Data); err != nil {
-								err = fmt.Errorf("flv: vvc seqhdr invalid: %s", err.Error())
-								return
-							}
-							prober.VideoStreamIdx = len(prober.Streams)
-							prober.Streams = append(prober.Streams, stream)
-							prober.GotVideo = true
+				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
+					prober.CacheTag(tag, timestamp)
+				}
+			} else if tag.FourCC == flvio.FOURCC_VVC {
+				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
+					if !prober.GotVideo {
+						var stream vvcparser.CodecData
+						//fmt.Printf("got VVC sequence start:\n%s\n", hex.Dump(tag.Data))
+						if stream, err = vvcparser.NewCodecDataFromVVCDecoderConfRecord(tag.Data); err != nil {
+							err = fmt.Errorf("flv: vvc seqhdr invalid: %s", err.Error())
+							return
 						}
-					} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
-						prober.CacheTag(tag, timestamp)
+						prober.VideoStreamIdx = len(prober.Streams)
+						prober.Streams = append(prober.Streams, stream)
+						prober.GotVideo = true
 					}
 				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
 					prober.CacheTag(tag, timestamp)
