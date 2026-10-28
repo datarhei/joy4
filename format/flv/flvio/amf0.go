@@ -73,8 +73,20 @@ const (
 	avmplusobjectmarker
 )
 
+// amf0Value returns the AMF type for values of the same underlying type, e.g. AMFMap for a
+// map[string]interface{}.
+func amf0Value(val interface{}) interface{} {
+	switch val := val.(type) {
+	case map[string]interface{}:
+		return AMFMap(val)
+	case []interface{}:
+		return AMFArray(val)
+	}
+	return val
+}
+
 func LenAMF0Val(_val interface{}) (n int) {
-	switch val := _val.(type) {
+	switch val := amf0Value(_val).(type) {
 	case int8:
 		n += lenAMF0Number
 	case int16:
@@ -141,13 +153,17 @@ func LenAMF0Val(_val interface{}) (n int) {
 
 	case nil:
 		n++
+
+	default:
+		// unsupported types are encoded as null, such that the message stays valid
+		n++
 	}
 
 	return
 }
 
 func FillAMF0Val(b []byte, _val interface{}) (n int) {
-	switch val := _val.(type) {
+	switch val := amf0Value(_val).(type) {
 	case int8:
 		n += fillAMF0Number(b[n:], float64(val))
 	case int16:
@@ -250,6 +266,11 @@ func FillAMF0Val(b []byte, _val interface{}) (n int) {
 		n++
 
 	case nil:
+		b[n] = nullmarker
+		n++
+
+	default:
+		// unsupported types are encoded as null, such that the message stays valid
 		b[n] = nullmarker
 		n++
 	}

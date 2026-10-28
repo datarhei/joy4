@@ -57,7 +57,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 
 ## F. AMF0
 39. [x] **Strings of exactly 65536 bytes are encoded wrongly.** The check is `<= 65536` (`amf0.go:126,199`), so the uint16 length overflows to 0. It should be `<= 65535`.
-40. [ ] **Unsupported Go types encode to 0 bytes silently.** For example `map[string]interface{}`, `[]interface{}`, pointers. Inside an AMFMap, the key is then written with no value, which corrupts the message. That is reachable through `SetMetaData`. Return an error or panic.
+40. [x] **Unsupported Go types encode to 0 bytes silently.** For example `map[string]interface{}`, `[]interface{}`, pointers. Inside an AMFMap, the key is then written with no value, which corrupts the message. That is reachable through `SetMetaData`. Return an error or panic.
 41. [ ] **Unsupported markers.** Reference, typed-object and AMF3-switch markers fail the whole message. A metadata parse error kills the connection.
 
 ## G. Concurrency / lifecycle / API
@@ -77,3 +77,4 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 
 ## H. Other packages
 47. [ ] **`pktque.Walltime` never paces packets.** `av/pktque/filters.go`: `ModifyPacket` sets the start time only if `firsttime == math.MinInt64`, but the zero value of `firsttime` is 0, so the start time is never set and the filter never sleeps. A publisher using it (e.g. `examples/rtmp_publish`) sends a whole file at once instead of in real time. It also uses `time.Now().Unix() * 1000`, which has only second resolution.
+51. [ ] **`h264parser` uses a fixed crop unit.** `codec/h264parser/parser.go` computes the width and height from the SPS with `CropLeft*2`, `CropTop*2` etc., i.e. a crop unit of 2, which is only correct for 4:2:0 chroma with frame_mbs_only_flag = 1. The crop unit depends on chroma_format_idc (4:2:0: 2x2, 4:2:2: 2x1, 4:4:4 and monochrome: 1x1) and, vertically, on frame_mbs_only_flag (ISO/IEC 14496-10, 7.4.2.1.1). Seen with a 640x360 4:4:4 stream from FFmpeg (libx264), for which joy4 reports 640x352 (e.g. in the metadata).

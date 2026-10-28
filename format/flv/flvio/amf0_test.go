@@ -137,3 +137,53 @@ func TestAMF0StringLength(t *testing.T) {
 		require.Equal(t, val, parsed, "length %d", tc.length)
 	}
 }
+
+// amf0RoundTrip encodes the value, checks the length, and returns the parsed value.
+func amf0RoundTrip(t *testing.T, val interface{}) interface{} {
+	b := make([]byte, LenAMF0Val(val))
+	n := FillAMF0Val(b, val)
+	require.Equal(t, len(b), n)
+
+	parsed, size, err := ParseAMF0Val(b)
+	require.NoError(t, err)
+	require.Equal(t, n, size)
+
+	return parsed
+}
+
+func TestAMF0GoMapAndSlice(t *testing.T) {
+	val := map[string]interface{}{
+		"a": 1.0,
+		"b": []interface{}{"x", 2.0},
+		"c": map[string]interface{}{"d": true},
+	}
+
+	require.Equal(t, AMFMap{
+		"a": 1.0,
+		"b": AMFArray{"x", 2.0},
+		"c": AMFMap{"d": true},
+	}, amf0RoundTrip(t, val))
+
+	require.Equal(t, AMFArray{"x", AMFMap{"y": 3.0}}, amf0RoundTrip(t, []interface{}{"x", map[string]interface{}{"y": 3.0}}))
+}
+
+func TestAMF0UnsupportedType(t *testing.T) {
+	val := AMFMap{
+		"width":   1280.0,
+		"pointer": &struct{}{},
+		"func":    func() {},
+		"strings": []string{"x"},
+		"nil":     (*int)(nil),
+		"after":   "ok",
+	}
+
+	// unsupported values become null, the other values are kept
+	require.Equal(t, AMFMap{
+		"width":   1280.0,
+		"pointer": nil,
+		"func":    nil,
+		"strings": nil,
+		"nil":     nil,
+		"after":   "ok",
+	}, amf0RoundTrip(t, val))
+}
