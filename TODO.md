@@ -56,7 +56,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 50. [ ] **Legacy video codecs are not supported (optional, for later).** The FLV spec defines the video codec ids 2 (Sorenson H.263), 3 (Screen video), 4 (On2 VP6), 5 (On2 VP6 with alpha) and 6 (Screen video v2), but joy4 only supports AVC (7) in the legacy header. Since #33, such streams are probed without video. Support would need a codec type in `av` and `CodecData` without configuration record (width and height from the picture header), probing from the first frame (like Speex/Nellymoser), writing them in `CodecDataToTag`/`PacketToTag`/`NewMetadataByStreams`, and accepting the disposable inter frame (3) of H.263 in `handleMsg`.
 
 ## F. AMF0
-39. [ ] **Strings of exactly 65536 bytes are encoded wrongly.** The check is `<= 65536` (`amf0.go:126,199`), so the uint16 length overflows to 0. It should be `<= 65535`.
+39. [x] **Strings of exactly 65536 bytes are encoded wrongly.** The check is `<= 65536` (`amf0.go:126,199`), so the uint16 length overflows to 0. It should be `<= 65535`.
 40. [ ] **Unsupported Go types encode to 0 bytes silently.** For example `map[string]interface{}`, `[]interface{}`, pointers. Inside an AMFMap, the key is then written with no value, which corrupts the message. That is reachable through `SetMetaData`. Return an error or panic.
 41. [ ] **Unsupported markers.** Reference, typed-object and AMF3-switch markers fail the whole message. A metadata parse error kills the connection.
 

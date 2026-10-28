@@ -1,6 +1,7 @@
 package flvio
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -108,4 +109,31 @@ func TestParseAMF0DeepNesting(t *testing.T) {
 
 	_, _, err = ParseAMF0Val(b)
 	require.ErrorContains(t, err, "depth:")
+}
+
+func TestAMF0StringLength(t *testing.T) {
+	for _, tc := range []struct {
+		length int
+		marker byte
+		header int
+	}{
+		{0, stringmarker, 3},
+		{0xFFFF, stringmarker, 3},
+		{0xFFFF + 1, longstringmarker, 5},
+		{0xFFFF + 2, longstringmarker, 5},
+	} {
+		val := string(bytes.Repeat([]byte{'x'}, tc.length))
+
+		b := make([]byte, LenAMF0Val(val))
+		require.Equal(t, tc.header+tc.length, len(b), "length %d", tc.length)
+
+		n := FillAMF0Val(b, val)
+		require.Equal(t, len(b), n, "length %d", tc.length)
+		require.Equal(t, tc.marker, b[0], "length %d", tc.length)
+
+		parsed, size, err := ParseAMF0Val(b)
+		require.NoError(t, err, "length %d", tc.length)
+		require.Equal(t, n, size, "length %d", tc.length)
+		require.Equal(t, val, parsed, "length %d", tc.length)
+	}
 }

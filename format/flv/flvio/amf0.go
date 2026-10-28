@@ -123,7 +123,7 @@ func LenAMF0Val(_val interface{}) (n int) {
 
 	case string:
 		u := len(val)
-		if u <= 65536 {
+		if u <= 0xFFFF { // the length of a string has 16 bits, of a long string 32 bits
 			n += 3
 		} else {
 			n += 5
@@ -196,7 +196,7 @@ func FillAMF0Val(b []byte, _val interface{}) (n int) {
 
 	case string:
 		u := len(val)
-		if u <= 65536 {
+		if u <= 0xFFFF { // the length of a string has 16 bits, of a long string 32 bits
 			b[n] = stringmarker
 			n++
 			pio.PutU16BE(b[n:], uint16(u))
