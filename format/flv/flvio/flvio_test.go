@@ -72,3 +72,35 @@ func TestVideoFillHeaderVVC(t *testing.T) {
 	n = tag.FillHeader(b)
 	require.Equal(t, []byte{0x93, 'v', 'v', 'c', '1'}, b[:n])
 }
+
+func TestVideoCompositionTime(t *testing.T) {
+	b := make([]byte, MaxTagSubHeaderLength)
+
+	for _, tc := range []struct {
+		cts, expected int64
+	}{
+		{0, 0},
+		{40, 40},
+		{-33, -33},
+		{-40, -40},
+		{0x7FFFFF, 0x7FFFFF},
+		{-0x800000, -0x800000},
+		{0x7FFFFF + 1, 0x7FFFFF},   // limited to SI24
+		{-0x800000 - 1, -0x800000}, // limited to SI24
+	} {
+		for _, tag := range []Tag{
+			{Type: TAG_VIDEO, FrameType: FRAME_INTER, CodecID: VIDEO_H264, AVCPacketType: AVC_NALU},
+			{Type: TAG_VIDEO, IsExHeader: true, FrameType: FRAME_INTER, PacketType: PKTTYPE_CODED_FRAMES, FourCC: FOURCC_HEVC},
+			{Type: TAG_VIDEO, IsExHeader: true, FrameType: FRAME_INTER, PacketType: PKTTYPE_CODED_FRAMES, FourCC: FOURCC_VVC},
+		} {
+			tag.CompositionTime = tc.cts
+			n := tag.FillHeader(b)
+
+			parsed := Tag{Type: TAG_VIDEO}
+			m, err := parsed.ParseHeader(b[:n])
+			require.NoError(t, err)
+			require.Equal(t, n, m)
+			require.Equal(t, tc.expected, parsed.CompositionTime, "cts %d, codec %d, fourcc %s", tc.cts, tag.CodecID, tag.FourCC[:])
+		}
+	}
+}

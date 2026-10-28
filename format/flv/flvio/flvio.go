@@ -326,6 +326,17 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 	return
 }
 
+// compositionTimeSI24 returns the composition time limited to the range of an SI24.
+func compositionTimeSI24(cts int64) int32 {
+	if cts > 0x7FFFFF {
+		return 0x7FFFFF
+	}
+	if cts < -0x800000 {
+		return -0x800000
+	}
+	return int32(cts)
+}
+
 func (t Tag) videoFillHeader(b []byte) (n int) {
 	if t.IsExHeader {
 		flags := t.FrameType<<4 | t.PacketType | 0b10000000
@@ -340,7 +351,7 @@ func (t Tag) videoFillHeader(b []byte) (n int) {
 		// HEVC and VVC have a composition time offset with CodedFrames (E-RTMP v2)
 		if t.FourCC == FOURCC_HEVC || t.FourCC == FOURCC_VVC {
 			if t.PacketType == PKTTYPE_CODED_FRAMES {
-				pio.PutI24BE(b[n:], int32(t.CompositionTime&0x7FFFFF))
+				pio.PutI24BE(b[n:], compositionTimeSI24(t.CompositionTime))
 				n += 3
 			}
 		}
@@ -350,7 +361,7 @@ func (t Tag) videoFillHeader(b []byte) (n int) {
 		n++
 		b[n] = t.AVCPacketType
 		n++
-		pio.PutI24BE(b[n:], int32(t.CompositionTime&0x7FFFFF))
+		pio.PutI24BE(b[n:], compositionTimeSI24(t.CompositionTime))
 		n += 3
 	}
 
