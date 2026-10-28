@@ -308,7 +308,8 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 
 		t.CompositionTime = 0
 
-		if t.FourCC == FOURCC_HEVC {
+		// HEVC and VVC have a composition time offset with CodedFrames (E-RTMP v2)
+		if t.FourCC == FOURCC_HEVC || t.FourCC == FOURCC_VVC {
 			if t.PacketType == PKTTYPE_CODED_FRAMES {
 				if len(b) < n+3 {
 					err = fmt.Errorf("videodata: parse invalid: not enough bytes for the composition time")
@@ -336,7 +337,8 @@ func (t Tag) videoFillHeader(b []byte) (n int) {
 		b[n+3] = t.FourCC[3]
 		n += 4
 
-		if t.FourCC == FOURCC_HEVC {
+		// HEVC and VVC have a composition time offset with CodedFrames (E-RTMP v2)
+		if t.FourCC == FOURCC_HEVC || t.FourCC == FOURCC_VVC {
 			if t.PacketType == PKTTYPE_CODED_FRAMES {
 				pio.PutI24BE(b[n:], int32(t.CompositionTime&0x7FFFFF))
 				n += 3

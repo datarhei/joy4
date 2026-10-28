@@ -517,6 +517,10 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 			Data:            pkt.Data,
 		}
 
+		if pkt.CompositionTime == 0 {
+			tag.PacketType = flvio.PKTTYPE_CODED_FRAMESX
+		}
+
 		if pkt.IsKeyFrame {
 			tag.FrameType = flvio.FRAME_KEY
 		} else {

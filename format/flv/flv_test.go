@@ -80,3 +80,32 @@ func TestMuxDemuxVVC(t *testing.T) {
 		require.Equal(t, i == 0, pkt.IsKeyFrame)
 	}
 }
+
+func TestMuxDemuxVVCCompositionTime(t *testing.T) {
+	stream, err := vvcparser.NewCodecDataFromVVCDecoderConfRecord([]byte{0x01, 0x02, 0x03, 0x04})
+	require.NoError(t, err)
+
+	buf := &bytes.Buffer{}
+	muxer := NewMuxer(buf)
+
+	err = muxer.WriteHeader([]av.CodecData{stream})
+	require.NoError(t, err)
+
+	cts := []int64{80, 0, 40}
+	for i, c := range cts {
+		err = muxer.WritePacket(av.Packet{Idx: 0, IsKeyFrame: i == 0, Data: []byte{0xAA, byte(i)}, Time: int64(40 * i), CompositionTime: c})
+		require.NoError(t, err)
+	}
+
+	err = muxer.WriteTrailer()
+	require.NoError(t, err)
+
+	demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+
+	for i, c := range cts {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err)
+		require.Equal(t, []byte{0xAA, byte(i)}, pkt.Data, "packet %d", i)
+		require.Equal(t, c, pkt.CompositionTime, "packet %d", i)
+	}
+}
