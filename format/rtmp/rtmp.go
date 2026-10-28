@@ -139,11 +139,49 @@ type Server struct {
 	// MaxChunkStreams is the max. number of chunk streams a peer can use. 0 is DefaultMaxChunkStreams.
 	MaxChunkStreams int
 
+	// lock guards the listener, the active connections and whether the server is closed
+	lock     sync.Mutex
 	listener net.Listener
-	doneChan chan struct{}
+	conns    map[net.Conn]struct{}
+	closed   bool
+}
+
+// trackConn adds or removes an active connection. It returns false if the server is closed.
+func (s *Server) trackConn(conn net.Conn, add bool) bool {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if !add {
+		delete(s.conns, conn)
+		return true
+	}
+
+	if s.closed {
+		return false
+	}
+
+	if s.conns == nil {
+		s.conns = make(map[net.Conn]struct{})
+	}
+	s.conns[conn] = struct{}{}
+
+	return true
+}
+
+func (s *Server) isClosed() bool {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	return s.closed
 }
 
 func (s *Server) HandleNetConn(netconn net.Conn) (err error) {
+	if !s.trackConn(netconn, true) {
+		netconn.Close()
+		return ErrServerClosed
+	}
+	defer s.trackConn(netconn, false)
+
 	conn := NewConn(netconn)
 	conn.prober = flv.NewProber(s.MaxProbePacketCount)
 	conn.skipInvalidMessages = s.SkipInvalidMessages
@@ -249,22 +287,26 @@ func (s *Server) ServeTLS(listener net.Listener, certFile, keyFile string) error
 }
 
 func (s *Server) Serve(listener net.Listener) error {
-	s.doneChan = make(chan struct{})
-
+	s.lock.Lock()
+	if s.closed {
+		s.lock.Unlock()
+		listener.Close()
+		return ErrServerClosed
+	}
 	s.listener = listener
-	defer s.listener.Close()
+	s.lock.Unlock()
+
+	defer listener.Close()
 
 	if Debug {
-		fmt.Println("rtmp: server: listening on", s.listener.Addr().String())
+		fmt.Println("rtmp: server: listening on", listener.Addr().String())
 	}
 
 	for {
-		netconn, err := s.listener.Accept()
+		netconn, err := listener.Accept()
 		if err != nil {
-			select {
-			case <-s.doneChan:
+			if s.isClosed() {
 				return ErrServerClosed
-			default:
 			}
 
 			return err
@@ -283,12 +325,23 @@ func (s *Server) Serve(listener net.Listener) error {
 	}
 }
 
+// Close closes the listener and all active connections. Serve returns ErrServerClosed afterwards.
+// It can be called more than once.
 func (s *Server) Close() {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if s.closed {
+		return
+	}
+	s.closed = true
+
 	if s.listener != nil {
 		s.listener.Close()
-		s.listener = nil
+	}
 
-		close(s.doneChan)
+	for conn := range s.conns {
+		conn.Close()
 	}
 }
 

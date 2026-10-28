@@ -2401,3 +2401,132 @@ func TestDataMessageTypedObject(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, flvio.AMFMap{"width": 1280.0}, conn.GetMetaData())
 }
+
+func TestServerClose(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	server := &Server{}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- server.Serve(ln)
+	}()
+
+	// the server accepts connections
+	c, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	c.Close()
+
+	// more than once, also concurrently
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server.Close()
+		}()
+	}
+	wg.Wait()
+	server.Close()
+
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, ErrServerClosed)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "Serve didn't return")
+	}
+
+	// the listener is closed
+	_, err = net.Dial("tcp", ln.Addr().String())
+	require.Error(t, err)
+}
+
+func TestServerCloseBeforeServe(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	server := &Server{}
+	server.Close()
+
+	err = server.Serve(ln)
+	require.ErrorIs(t, err, ErrServerClosed)
+
+	// the listener is closed
+	_, err = net.Dial("tcp", ln.Addr().String())
+	require.Error(t, err)
+
+	// new connections are rejected
+	c1, c2 := net.Pipe()
+	defer c2.Close()
+	err = server.HandleNetConn(c1)
+	require.ErrorIs(t, err, ErrServerClosed)
+}
+
+func TestServerCloseActiveConnections(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	publishing := make(chan struct{})
+	handled := make(chan error, 1)
+
+	server := &Server{
+		HandlePublish: func(conn *Conn) {
+			close(publishing)
+			for {
+				if _, err := conn.ReadPacket(); err != nil {
+					handled <- err
+					return
+				}
+			}
+		},
+	}
+
+	go server.Serve(ln)
+	defer server.Close()
+
+	conn, err := Dial("rtmp://"+ln.Addr().String()+"/live/test", DialOptions{})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	stream, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	err = conn.WriteHeader([]av.CodecData{stream})
+	require.NoError(t, err)
+
+	// publish until the connection is closed by the server
+	published := make(chan error, 1)
+	go func() {
+		for i := 0; ; i++ {
+			if err := conn.WritePacket(av.Packet{Idx: 0, Data: []byte{byte(i)}, Time: int64(23 * i)}); err != nil {
+				published <- err
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-publishing:
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "the client doesn't publish")
+	}
+
+	server.Close()
+
+	// the handler of the active connection ends
+	select {
+	case err := <-handled:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "the handler didn't end")
+	}
+
+	// the client notices it
+	select {
+	case err := <-published:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "the client didn't notice the closed connection")
+	}
+}

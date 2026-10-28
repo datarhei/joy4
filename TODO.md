@@ -64,7 +64,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 ## G. Concurrency / lifecycle / API
 42. [x] **Data race on the byte counters.** `TxBytes`/`RxBytes` are read from other goroutines without atomics.
 43. [x] **`Conn` is not safe for concurrent reads and writes.** The read path writes Acks and Ping responses through the shared `bufw` and `writebuf`. Any user who reads and writes at the same time (needed to fix #24/#26) will corrupt output. A write mutex is needed. This is also needed for reading from the socket of a player during playback (#24).
-44. [ ] **Unsynchronized server shutdown.** `Server.Close` races with `Serve` on `listener`/`doneChan`, and calling `Close` twice can panic. Active connections are not closed.
+44. [x] **Unsynchronized server shutdown.** `Server.Close` races with `Serve` on `listener`/`doneChan`, and calling `Close` twice can panic. Active connections are not closed.
 45. [ ] **Leaking `Handler` helpers.** `ServerMuxer` and `ServerDemuxer` leak the server, and they block forever on unbuffered channels for a second client or when `ListenAndServe` returns.
 46. [ ] **Minor:**
    - `writeAVTag` flushes after every frame, which is one syscall per frame.
