@@ -21,6 +21,7 @@ import (
 
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/codec/aacparser"
+	"github.com/datarhei/joy4/format/flv"
 	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/datarhei/joy4/utils/bits/pio"
 	"github.com/stretchr/testify/require"
@@ -2267,5 +2268,34 @@ func TestRTMPS(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		require.Fail(t, "timeout waiting for the server")
+	}
+}
+
+func TestProbeInvalidLastTag(t *testing.T) {
+	// the metadata announces audio and video, the last tag before the probe limit is an invalid
+	// AVC sequence header
+	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"})
+	data = append(data, commandMessage("createStream", 2.0, nil)...)
+	data = append(data, commandMessage("publish", 3.0, nil, "test", "live")...)
+	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"audiocodecid": 10.0, "videocodecid": 7.0})...)
+	data = append(data, chunkMessage(4, 0, msgtypeidAudioMsg, 1, []byte{0xAF, 0x00, 0x12, 0x10}, 128)...)
+	data = append(data, chunkMessage(4, 0, msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, 0x00}, 128)...)
+	data = append(data, chunkMessage(6, 0, msgtypeidVideoMsg, 1, []byte{0x17, 0x00, 0x00, 0x00, 0x00, 0xFF}, 128)...)
+	data = append(data, chunkMessage(4, 23, msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, 0x01}, 128)...)
+
+	conn := newReadConn(data)
+	conn.isserver = true
+	conn.stage = stageHandshakeDone
+	conn.prober = flv.NewProber(3)
+
+	streams, err := conn.Streams()
+	require.NoError(t, err)
+	require.Len(t, streams, 1)
+	require.Equal(t, av.AAC, streams[0].Type())
+
+	for i := 0; i < 2; i++ {
+		pkt, err := conn.ReadPacket()
+		require.NoError(t, err)
+		require.Equal(t, []byte{byte(i)}, pkt.Data)
 	}
 }

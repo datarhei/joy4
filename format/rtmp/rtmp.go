@@ -1064,9 +1064,10 @@ func (conn *Conn) probe() (err error) {
 		if tag, err = conn.pollAVTag(); err != nil {
 			return
 		}
-		if err = conn.prober.PushTag(tag, conn.timestamp); err != nil {
+		// an invalid tag is skipped, it doesn't fail the connection
+		if perr := conn.prober.PushTag(tag, conn.timestamp); perr != nil {
 			if Debug {
-				fmt.Printf("rtmp: error probing tag: %s\n", err.Error())
+				fmt.Printf("rtmp: error probing tag: %s\n", perr.Error())
 			}
 		}
 	}
