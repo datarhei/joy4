@@ -2299,3 +2299,65 @@ func TestProbeInvalidLastTag(t *testing.T) {
 		require.Equal(t, []byte{byte(i)}, pkt.Data)
 	}
 }
+
+func TestByteCountersConcurrent(t *testing.T) {
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// reads the counters while the connection is used
+	poll := func(conn *Conn) {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				conn.TxBytes()
+				conn.RxBytes()
+			}
+		}
+	}
+
+	var serverRx, serverTx uint64
+
+	url, result := publishServer(t, func(s *Conn) error {
+		wg.Add(1)
+		go poll(s)
+
+		for {
+			if _, err := s.ReadPacket(); err != nil {
+				serverRx, serverTx = s.RxBytes(), s.TxBytes()
+				return nil
+			}
+		}
+	})
+
+	conn, err := Dial(url, DialOptions{})
+	require.NoError(t, err)
+
+	wg.Add(1)
+	go poll(conn)
+
+	stream, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+
+	err = conn.WriteHeader([]av.CodecData{stream})
+	require.NoError(t, err)
+
+	for i := 0; i < 200; i++ {
+		err = conn.WritePacket(av.Packet{Idx: 0, Data: bytes.Repeat([]byte{byte(i)}, 1000), Time: int64(23 * i)})
+		require.NoError(t, err)
+	}
+
+	clientTx := conn.TxBytes()
+	conn.Close()
+
+	require.NoError(t, <-result)
+	close(done)
+	wg.Wait()
+
+	// the server read everything the client sent
+	require.Greater(t, clientTx, uint64(200*1000))
+	require.Equal(t, clientTx, serverRx)
+	require.Greater(t, serverTx, uint64(0))
+}

@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/datarhei/joy4/av"
@@ -469,21 +470,24 @@ func (t *idleConn) SetIdleTimeout(d time.Duration) error {
 	return t.SetWriteIdleTimeout(d)
 }
 
+// txrxcount counts the transmitted and received bytes. The counters are accessed atomically, as
+// reading, writing and reading the counters can happen in different goroutines. They are the first
+// fields for the 64-bit alignment of atomic operations on 32-bit platforms.
 type txrxcount struct {
-	io.ReadWriteCloser
 	txbytes uint64
 	rxbytes uint64
+	io.ReadWriteCloser
 }
 
 func (t *txrxcount) Read(p []byte) (int, error) {
 	n, err := t.ReadWriteCloser.Read(p)
-	t.rxbytes += uint64(n)
+	atomic.AddUint64(&t.rxbytes, uint64(n))
 	return n, err
 }
 
 func (t *txrxcount) Write(p []byte) (int, error) {
 	n, err := t.ReadWriteCloser.Write(p)
-	t.txbytes += uint64(n)
+	atomic.AddUint64(&t.txbytes, uint64(n))
 	return n, err
 }
 
@@ -613,11 +617,11 @@ func (conn *Conn) SetIdleTimeout(d time.Duration) error {
 }
 
 func (conn *Conn) TxBytes() uint64 {
-	return conn.txrxcount.txbytes
+	return atomic.LoadUint64(&conn.txrxcount.txbytes)
 }
 
 func (conn *Conn) RxBytes() uint64 {
-	return conn.txrxcount.rxbytes
+	return atomic.LoadUint64(&conn.txrxcount.rxbytes)
 }
 
 // IsPublishing returns whether the client publishes a stream.
