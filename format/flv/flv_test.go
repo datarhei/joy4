@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/codec/fake"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/stretchr/testify/require"
@@ -229,4 +230,122 @@ func TestProberLegacyCodec(t *testing.T) {
 	require.Equal(t, int8(0), pkt.Idx)
 	require.Equal(t, []byte{0xAA}, pkt.Data)
 	require.True(t, prober.Empty())
+}
+
+func colorInfoTag(colorInfo flvio.AMFMap) flvio.Tag {
+	return flvio.Tag{Type: flvio.TAG_VIDEO, IsExHeader: true, FrameType: flvio.FRAME_COMMAND, PacketType: flvio.PKTTYPE_METADATA, FourCC: flvio.FOURCC_VVC, Data: flvio.ColorInfoData(colorInfo)}
+}
+
+func TestMuxDemuxColorInfo(t *testing.T) {
+	stream, err := vvcparser.NewCodecDataFromVVCDecoderConfRecord([]byte{0x01, 0x02, 0x03, 0x04})
+	require.NoError(t, err)
+
+	infoA := flvio.AMFMap{"colorConfig": flvio.AMFMap{"colorPrimaries": 9.0}}
+	infoB := flvio.AMFMap{"hdrCll": flvio.AMFMap{"maxFall": 400.0, "maxCLL": 1000.0}}
+
+	buf := &bytes.Buffer{}
+	muxer := NewMuxer(buf)
+
+	err = muxer.WriteHeader([]av.CodecData{stream})
+	require.NoError(t, err)
+
+	// the color info before the first packet, a new one before the third packet, a reset before the fourth
+	expected := []flvio.AMFMap{infoA, infoA, infoB, nil}
+	for i := 0; i < 4; i++ {
+		switch i {
+		case 0:
+			muxer.SetColorInfo(infoA)
+		case 2:
+			muxer.SetColorInfo(infoB)
+		case 3:
+			muxer.SetColorInfo(nil)
+		}
+		err = muxer.WritePacket(av.Packet{Idx: 0, IsKeyFrame: i == 0, Data: []byte{byte(i)}, Time: int64(40 * i)})
+		require.NoError(t, err)
+	}
+
+	err = muxer.WriteTrailer()
+	require.NoError(t, err)
+
+	demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+
+	_, err = demuxer.Streams()
+	require.NoError(t, err)
+	require.Nil(t, demuxer.GetColorInfo())
+
+	for i := 0; i < 4; i++ {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err)
+		require.Equal(t, []byte{byte(i)}, pkt.Data, "packet %d", i)
+		require.Equal(t, expected[i], demuxer.GetColorInfo(), "packet %d", i)
+	}
+}
+
+func TestProberColorInfoWhileProbing(t *testing.T) {
+	infoA := flvio.AMFMap{"a": 1.0}
+	infoB := flvio.AMFMap{"b": 2.0}
+	infoC := flvio.AMFMap{"c": 3.0}
+
+	prober := NewProber(0)
+	prober.HasAudio = true
+	prober.HasVideo = true
+
+	// the color info is received while probing, between the cached packets
+	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_SEQHDR, []byte{0x12, 0x10}), 0))
+	require.NoError(t, prober.PushTag(colorInfoTag(infoA), 0))
+	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_CODED_FRAMESX, []byte{0xBB}), 0))
+	require.NoError(t, prober.PushTag(colorInfoTag(infoB), 23))
+	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_RAW, []byte{0xAA}), 23))
+	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_END, nil), 40))
+	require.NoError(t, prober.PushTag(colorInfoTag(infoC), 40))
+	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x01}), 40))
+	require.True(t, prober.Probed())
+	require.Nil(t, prober.ColorInfo)
+
+	require.False(t, prober.Empty())
+	pkt := prober.PopPacket()
+	require.Equal(t, []byte{0xBB}, pkt.Data)
+	require.Equal(t, infoA, prober.ColorInfo)
+
+	require.False(t, prober.Empty())
+	pkt = prober.PopPacket()
+	require.Equal(t, []byte{0xAA}, pkt.Data)
+	require.Equal(t, infoB, prober.ColorInfo)
+
+	// the end of the sequence is not a packet, the last color info applies to the next packet
+	require.True(t, prober.Empty())
+	require.Equal(t, infoC, prober.ColorInfo)
+
+	// after probing
+	_, ok := prober.TagToPacket(colorInfoTag(nil), 80)
+	require.False(t, ok)
+	require.Nil(t, prober.ColorInfo)
+	_, ok = prober.TagToPacket(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_END, nil), 80)
+	require.False(t, ok)
+}
+
+func TestColorInfoToTag(t *testing.T) {
+	info := flvio.AMFMap{"a": 1.0}
+
+	for _, tc := range []struct {
+		codec  av.CodecType
+		fourcc [4]byte
+	}{
+		{av.HEVC, flvio.FOURCC_HEVC},
+		{av.AV1, flvio.FOURCC_AV1},
+		{av.VP9, flvio.FOURCC_VP9},
+		{av.VVC, flvio.FOURCC_VVC},
+	} {
+		tag, ok := ColorInfoToTag(info, fake.CodecData{CodecType_: tc.codec})
+		require.True(t, ok, "%v", tc.codec)
+		require.Equal(t, tc.fourcc, tag.FourCC)
+
+		b := make([]byte, flvio.MaxTagSubHeaderLength)
+		n := tag.FillHeader(b)
+		require.Equal(t, append([]byte{0xD4}, tc.fourcc[:]...), b[:n])
+	}
+
+	// not defined for H.264
+	_, ok := ColorInfoToTag(info, fake.CodecData{CodecType_: av.H264})
+	require.False(t, ok)
 }

@@ -420,6 +420,10 @@ type Conn struct {
 
 	metadata flvio.AMFMap
 
+	// the color info to write before the next video packet
+	colorInfo        flvio.AMFMap
+	colorInfoPending bool
+
 	eventtype uint16
 
 	start time.Time
@@ -1497,6 +1501,15 @@ func (conn *Conn) WritePacket(pkt av.Packet) (err error) {
 		fmt.Println("rtmp: WritePacket", pkt.Idx, pkt.Time, pkt.CompositionTime)
 	}
 
+	if conn.colorInfoPending && stream.Type().IsVideo() {
+		conn.colorInfoPending = false
+		if colorInfoTag, ok := flv.ColorInfoToTag(conn.colorInfo, stream); ok {
+			if err = conn.writeAVTag(colorInfoTag, timestamp); err != nil {
+				return
+			}
+		}
+	}
+
 	if err = conn.writeAVTag(tag, timestamp); err != nil {
 		return
 	}
@@ -1517,6 +1530,19 @@ func (conn *Conn) SetMetaData(data flvio.AMFMap) {
 
 func (conn *Conn) GetMetaData() flvio.AMFMap {
 	return conn.metadata
+}
+
+// SetColorInfo sets the color info (HDR metadata, E-RTMP). It is sent before the next video packet if the
+// video codec is HEVC, AV1, VP9 or VVC, otherwise it is dropped. A nil color info resets it.
+func (conn *Conn) SetColorInfo(colorInfo flvio.AMFMap) {
+	conn.colorInfo = colorInfo
+	conn.colorInfoPending = true
+}
+
+// GetColorInfo returns the color info (HDR metadata, E-RTMP) that applies to the video packet read last and
+// the following ones. It is nil if no color info has been received or it has been reset.
+func (conn *Conn) GetColorInfo() flvio.AMFMap {
+	return conn.prober.ColorInfo
 }
 
 func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
@@ -2464,7 +2490,10 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 			return
 		}
 		//fmt.Printf("tag: %+v\n", tag)
-		if !(tag.FrameType == flvio.FRAME_INTER || tag.FrameType == flvio.FRAME_KEY) {
+		// the frame type is to be ignored for metadata (e.g. the color info), other frame types (e.g.
+		// command frames) don't contain video data
+		isMetadata := tag.IsExHeader && tag.PacketType == flvio.PKTTYPE_METADATA
+		if !isMetadata && !(tag.FrameType == flvio.FRAME_INTER || tag.FrameType == flvio.FRAME_KEY) {
 			return
 		}
 		tag.Data = msgdata[n:]

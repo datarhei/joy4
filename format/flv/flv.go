@@ -88,8 +88,26 @@ type Prober struct {
 	Streams                        []av.CodecData
 	CachedPkts                     []av.Packet
 
+	// ColorInfo is the color info (HDR metadata, E-RTMP) that applies to the video packet returned last
+	// and the following ones. It is nil if no color info has been received or it has been reset.
+	ColorInfo flvio.AMFMap
+
 	// the tags received while probing, converted to CachedPkts once probing is done
 	cachedTags []cachedTag
+
+	// the color info that has been received before the packet with the same index in CachedPkts, and
+	// before the next packet after CachedPkts
+	cachedColorInfo  []*colorInfoUpdate
+	pendingColorInfo *colorInfoUpdate
+}
+
+type colorInfoUpdate struct {
+	colorInfo flvio.AMFMap
+}
+
+// isVideoMetadata returns whether the tag is a video packet of the type PKTTYPE_METADATA (E-RTMP).
+func isVideoMetadata(tag flvio.Tag) bool {
+	return tag.Type == flvio.TAG_VIDEO && tag.IsExHeader && tag.PacketType == flvio.PKTTYPE_METADATA
 }
 
 type cachedTag struct {
@@ -125,7 +143,10 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
-		if tag.IsExHeader {
+		if isVideoMetadata(tag) {
+			// it applies to the packets after it
+			prober.CacheTag(tag, timestamp)
+		} else if tag.IsExHeader {
 			if tag.FourCC == flvio.FOURCC_HEVC {
 				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
 					if !prober.GotVideo {
@@ -323,8 +344,16 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 }
 
 // TagToPacket converts an audio or video tag to a packet of the probed stream of its kind. If there's no
-// such stream, or the codec of the tag doesn't match the codec of the stream, it returns false.
+// such stream, or the codec of the tag doesn't match the codec of the stream, it returns false. A tag with
+// color info (E-RTMP) updates ColorInfo and returns false.
 func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet, ok bool) {
+	if isVideoMetadata(tag) {
+		if colorInfo, found := flvio.ParseColorInfo(tag.Data); found {
+			prober.ColorInfo = colorInfo
+		}
+		return
+	}
+
 	var idx int
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
@@ -348,6 +377,7 @@ func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
 		pkt.Idx = int8(prober.VideoStreamIdx)
+		// other packet types (e.g. the end of the sequence) are not passed on
 		switch tag.PacketType {
 		case flvio.PKTTYPE_CODED_FRAMES, flvio.PKTTYPE_CODED_FRAMESX:
 			ok = true
@@ -389,24 +419,51 @@ func (prober *Prober) convertCachedTags() {
 		return
 	}
 
+	// the color info is applied when the packet after it is popped
+	update := prober.pendingColorInfo
 	for _, c := range prober.cachedTags {
+		if isVideoMetadata(c.tag) {
+			if colorInfo, found := flvio.ParseColorInfo(c.tag.Data); found {
+				update = &colorInfoUpdate{colorInfo}
+			}
+			continue
+		}
 		if pkt, ok := prober.TagToPacket(c.tag, c.timestamp); ok {
 			prober.CachedPkts = append(prober.CachedPkts, pkt)
+			prober.cachedColorInfo = append(prober.cachedColorInfo, update)
+			update = nil
 		}
 	}
+	prober.pendingColorInfo = update
 
 	prober.cachedTags = nil
 }
 
 func (prober *Prober) Empty() bool {
 	prober.convertCachedTags()
-	return len(prober.CachedPkts) == 0
+	if len(prober.CachedPkts) != 0 {
+		return false
+	}
+
+	// the color info after the last cached packet applies to the next packet
+	if prober.pendingColorInfo != nil {
+		prober.ColorInfo = prober.pendingColorInfo.colorInfo
+		prober.pendingColorInfo = nil
+	}
+
+	return true
 }
 
 func (prober *Prober) PopPacket() av.Packet {
 	prober.convertCachedTags()
 	pkt := prober.CachedPkts[0]
 	prober.CachedPkts = prober.CachedPkts[1:]
+	if len(prober.cachedColorInfo) != 0 {
+		if update := prober.cachedColorInfo[0]; update != nil {
+			prober.ColorInfo = update.colorInfo
+		}
+		prober.cachedColorInfo = prober.cachedColorInfo[1:]
+	}
 	return pkt
 }
 
@@ -519,6 +576,37 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 		err = fmt.Errorf("flv: unspported codecType=%v", stream.Type())
 		return
 	}
+	return
+}
+
+// ColorInfoToTag returns a video tag with the color info (HDR metadata, E-RTMP) for the stream. A nil color
+// info resets it. ok is false if the codec of the stream has no FourCC, i.e. the color info is only
+// defined for HEVC, AV1, VP9 and VVC.
+func ColorInfoToTag(colorInfo flvio.AMFMap, stream av.CodecData) (tag flvio.Tag, ok bool) {
+	var fourCC [4]byte
+	switch stream.Type() {
+	case av.HEVC:
+		fourCC = flvio.FOURCC_HEVC
+	case av.AV1:
+		fourCC = flvio.FOURCC_AV1
+	case av.VP9:
+		fourCC = flvio.FOURCC_VP9
+	case av.VVC:
+		fourCC = flvio.FOURCC_VVC
+	default:
+		return
+	}
+
+	tag = flvio.Tag{
+		Type:       flvio.TAG_VIDEO,
+		IsExHeader: true,
+		PacketType: flvio.PKTTYPE_METADATA,
+		// the frame type is to be ignored, FFmpeg writes a command frame
+		FrameType: flvio.FRAME_COMMAND,
+		FourCC:    fourCC,
+		Data:      flvio.ColorInfoData(colorInfo),
+	}
+	ok = true
 	return
 }
 
@@ -655,6 +743,9 @@ type Muxer struct {
 	bufw    writeFlusher
 	b       []byte
 	streams []av.CodecData
+
+	colorInfo        flvio.AMFMap
+	colorInfoPending bool
 }
 
 type writeFlusher interface {
@@ -707,9 +798,25 @@ func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 	return
 }
 
+// SetColorInfo sets the color info (HDR metadata, E-RTMP). It is written before the next video packet if
+// the video codec is HEVC, AV1, VP9 or VVC, otherwise it is dropped. A nil color info resets it.
+func (muxer *Muxer) SetColorInfo(colorInfo flvio.AMFMap) {
+	muxer.colorInfo = colorInfo
+	muxer.colorInfoPending = true
+}
+
 func (muxer *Muxer) WritePacket(pkt av.Packet) (err error) {
 	stream := muxer.streams[pkt.Idx]
 	tag, timestamp := PacketToTag(pkt, stream)
+
+	if muxer.colorInfoPending && stream.Type().IsVideo() {
+		muxer.colorInfoPending = false
+		if colorInfoTag, ok := ColorInfoToTag(muxer.colorInfo, stream); ok {
+			if err = flvio.WriteTag(muxer.bufw, colorInfoTag, timestamp, muxer.b); err != nil {
+				return
+			}
+		}
+	}
 
 	if err = flvio.WriteTag(muxer.bufw, tag, timestamp, muxer.b); err != nil {
 		return
@@ -785,6 +892,12 @@ func (demuxer *Demuxer) Streams() (streams []av.CodecData, err error) {
 	}
 	streams = demuxer.prober.Streams
 	return
+}
+
+// GetColorInfo returns the color info (HDR metadata, E-RTMP) that applies to the video packet read last and
+// the following ones. It is nil if no color info has been received or it has been reset.
+func (demuxer *Demuxer) GetColorInfo() flvio.AMFMap {
+	return demuxer.prober.ColorInfo
 }
 
 func (demuxer *Demuxer) ReadPacket() (pkt av.Packet, err error) {

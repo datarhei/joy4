@@ -9,12 +9,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"os"
+	"reflect"
 	"runtime"
 	"sync"
 	"testing"
@@ -23,6 +25,7 @@ import (
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/codec/aacparser"
+	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv"
 	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/datarhei/joy4/utils/bits/pio"
@@ -2721,4 +2724,105 @@ func TestHandlerServerListenError(t *testing.T) {
 	require.True(t, ok)
 	require.Error(t, err)
 	require.Nil(t, muxer)
+}
+
+// ffmpegColorInfo is a video message with the color info as FFmpeg 9 writes it for HEVC (bt2020, smpte2084,
+// bt2020nc), see flvio.
+const ffmpegColorInfo = "d468766331020009636f6c6f72496e666f03000b636f6c6f72436f6e6669670300177472616e736665724368617261637465726973746963730040300000000000000012" +
+	"6d6174726978436f656666696369656e7473004022000000000000000e636f6c6f725072696d6172696573004022000000000000000009000009"
+
+func TestReadColorInfo(t *testing.T) {
+	colorInfo, err := hex.DecodeString(ffmpegColorInfo)
+	require.NoError(t, err)
+
+	vvc := func(packetType byte, data ...byte) []byte {
+		return append([]byte{0x80 | flvio.FRAME_KEY<<4 | packetType, 'v', 'v', 'c', '1'}, data...)
+	}
+	video := func(timestamp uint32, payload []byte) []byte {
+		return chunkMessage(6, timestamp, msgtypeidVideoMsg, 1, payload, 128)
+	}
+
+	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"})
+	data = append(data, commandMessage("createStream", 2.0, nil)...)
+	data = append(data, commandMessage("publish", 3.0, nil, "test", "live")...)
+	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"videocodecid": 1.0})...)
+	data = concat(data,
+		video(0, colorInfo),
+		video(0, vvc(flvio.PKTTYPE_SEQUENCE_START, 0x01)),
+		video(0, vvc(flvio.PKTTYPE_CODED_FRAMESX, 0xA0)),
+		// an ExHeader command frame (E-RTMP v2) has no FourCC
+		video(20, []byte{0xD0, 0x01}),
+		video(40, vvc(flvio.PKTTYPE_CODED_FRAMESX, 0xA1)),
+		// a reset of the color info
+		video(80, append([]byte{0xD4, 'v', 'v', 'c', '1'}, flvio.ColorInfoData(nil)...)),
+		video(80, vvc(flvio.PKTTYPE_CODED_FRAMESX, 0xA2)),
+		video(120, vvc(flvio.PKTTYPE_SEQUENCE_END)),
+		video(120, vvc(flvio.PKTTYPE_CODED_FRAMESX, 0xA3)),
+	)
+
+	conn := newReadConn(data)
+	conn.isserver = true
+	conn.stage = stageHandshakeDone
+
+	expected := flvio.AMFMap{
+		"colorConfig": flvio.AMFMap{
+			"transferCharacteristics": 16.0,
+			"matrixCoefficients":      9.0,
+			"colorPrimaries":          9.0,
+		},
+	}
+
+	for i, info := range []flvio.AMFMap{expected, expected, nil, nil} {
+		pkt, err := conn.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, []byte{0xA0 + byte(i)}, pkt.Data, "packet %d", i)
+		require.Equal(t, info, conn.GetColorInfo(), "packet %d", i)
+	}
+}
+
+func TestWriteColorInfo(t *testing.T) {
+	infoA := flvio.AMFMap{"colorConfig": flvio.AMFMap{"colorPrimaries": 9.0}}
+	infoB := flvio.AMFMap{"hdrCll": flvio.AMFMap{"maxFall": 400.0, "maxCLL": 1000.0}}
+	expected := []flvio.AMFMap{infoA, infoA, infoB, nil}
+
+	url, result := publishServer(t, func(s *Conn) error {
+		for i, info := range expected {
+			pkt, err := s.ReadPacket()
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal([]byte{byte(i)}, pkt.Data) {
+				return fmt.Errorf("packet %d: got %v", i, pkt.Data)
+			}
+			if !reflect.DeepEqual(info, s.GetColorInfo()) {
+				return fmt.Errorf("packet %d: got color info %v", i, s.GetColorInfo())
+			}
+		}
+		return nil
+	})
+
+	conn, err := Dial(url, DialOptions{})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	stream, err := vvcparser.NewCodecDataFromVVCDecoderConfRecord([]byte{0x01, 0x02, 0x03, 0x04})
+	require.NoError(t, err)
+
+	// set before WriteHeader, it's sent before the first packet
+	conn.SetColorInfo(infoA)
+	err = conn.WriteHeader([]av.CodecData{stream})
+	require.NoError(t, err)
+
+	for i := range expected {
+		switch i {
+		case 2:
+			conn.SetColorInfo(infoB)
+		case 3:
+			conn.SetColorInfo(nil)
+		}
+		err = conn.WritePacket(av.Packet{Idx: 0, IsKeyFrame: i == 0, Data: []byte{byte(i)}, Time: int64(40 * i)})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, <-result)
 }
