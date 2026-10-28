@@ -3,9 +3,16 @@ package rtmp
 import (
 	"bufio"
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"sync"
@@ -2151,4 +2158,114 @@ func TestCommandWithoutTransactionID(t *testing.T) {
 	require.True(t, conn.gotcommand)
 	require.Equal(t, "onBWDone", conn.commandname)
 	require.Nil(t, conn.commandobj)
+}
+
+func TestParseURLDefaultPort(t *testing.T) {
+	for _, tc := range []struct {
+		url, host string
+	}{
+		{"rtmp://example.com/live/test", "example.com:1935"},
+		{"rtmps://example.com/live/test", "example.com:443"},
+		{"rtmp://example.com:1936/live/test", "example.com:1936"},
+		{"rtmps://example.com:8443/live/test", "example.com:8443"},
+	} {
+		u, err := ParseURL(tc.url)
+		require.NoError(t, err)
+		require.Equal(t, tc.host, u.Host, tc.url)
+	}
+}
+
+// selfSignedCert returns a certificate for 127.0.0.1 and a pool with it.
+func selfSignedCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "joy4 test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pool
+}
+
+func TestRTMPS(t *testing.T) {
+	cert, pool := selfSignedCert(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	result := make(chan error, 1)
+
+	server := &Server{
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
+		HandlePublish: func(conn *Conn) {
+			if _, ok := conn.NetConn().(*tls.Conn); !ok {
+				result <- fmt.Errorf("not a TLS connection")
+				return
+			}
+			for i := 0; i < 3; i++ {
+				pkt, err := conn.ReadPacket()
+				if err != nil {
+					result <- err
+					return
+				}
+				if !bytes.Equal(pkt.Data, []byte{byte(i)}) {
+					result <- fmt.Errorf("wrong packet %d", i)
+					return
+				}
+			}
+			result <- nil
+		},
+	}
+
+	go server.ServeTLS(ln, "", "")
+	defer server.Close()
+
+	url := "rtmps://" + ln.Addr().String() + "/live/test"
+
+	// the certificate is not trusted
+	conn, err := Dial(url, DialOptions{})
+	if err == nil {
+		conn.Close()
+	}
+	require.Error(t, err)
+
+	conn, err = Dial(url, DialOptions{TLSConfig: &tls.Config{RootCAs: pool}})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	_, ok := conn.NetConn().(*tls.Conn)
+	require.True(t, ok)
+
+	stream, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+
+	err = conn.WriteHeader([]av.CodecData{stream})
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		err = conn.WritePacket(av.Packet{Idx: 0, Data: []byte{byte(i)}, Time: int64(23 * i)})
+		require.NoError(t, err)
+	}
+
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "timeout waiting for the server")
+	}
 }

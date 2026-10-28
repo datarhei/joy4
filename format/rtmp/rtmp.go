@@ -26,12 +26,18 @@ import (
 
 var Debug bool
 
+// ParseURL parses an rtmp:// or rtmps:// URL. If the URL has no port, the default port is
+// added (1935 for rtmp, 443 for rtmps).
 func ParseURL(uri string) (u *url.URL, err error) {
 	if u, err = url.Parse(uri); err != nil {
 		return
 	}
 	if _, _, serr := net.SplitHostPort(u.Host); serr != nil {
-		u.Host += ":1935"
+		if u.Scheme == "rtmps" {
+			u.Host += ":443"
+		} else {
+			u.Host += ":1935"
+		}
 	}
 	return
 }
@@ -53,6 +59,10 @@ type DialOptions struct {
 
 	// MaxChunkStreams is the max. number of chunk streams the peer can use. 0 is DefaultMaxChunkStreams.
 	MaxChunkStreams int
+
+	// TLSConfig is the TLS configuration for rtmps:// URLs. If nil, the default configuration is used.
+	// If ServerName is not set, the host of the URL is used.
+	TLSConfig *tls.Config
 }
 
 func Dial(uri string, options DialOptions) (conn *Conn, err error) {
@@ -67,8 +77,23 @@ func DialTimeout(uri string, timeout time.Duration, options DialOptions) (conn *
 
 	dailer := net.Dialer{Timeout: timeout}
 	var netconn net.Conn
-	if netconn, err = dailer.Dial("tcp", u.Host); err != nil {
-		return
+	if u.Scheme == "rtmps" {
+		var config *tls.Config
+		if options.TLSConfig != nil {
+			config = options.TLSConfig.Clone()
+		} else {
+			config = &tls.Config{}
+		}
+		if len(config.ServerName) == 0 {
+			config.ServerName = u.Hostname()
+		}
+		if netconn, err = tls.DialWithDialer(&dailer, "tcp", u.Host, config); err != nil {
+			return
+		}
+	} else {
+		if netconn, err = dailer.Dial("tcp", u.Host); err != nil {
+			return
+		}
 	}
 
 	conn = NewConn(netconn)
@@ -2674,7 +2699,7 @@ func (cc closeConn) Close() error {
 
 func Handler(h *avutil.RegisterHandler) {
 	h.UrlDemuxer = func(uri string) (ok bool, demuxer av.DemuxCloser, err error) {
-		if !strings.HasPrefix(uri, "rtmp://") {
+		if !strings.HasPrefix(uri, "rtmp://") && !strings.HasPrefix(uri, "rtmps://") {
 			return
 		}
 		ok = true
@@ -2683,7 +2708,7 @@ func Handler(h *avutil.RegisterHandler) {
 	}
 
 	h.UrlMuxer = func(uri string) (ok bool, muxer av.MuxCloser, err error) {
-		if !strings.HasPrefix(uri, "rtmp://") {
+		if !strings.HasPrefix(uri, "rtmp://") && !strings.HasPrefix(uri, "rtmps://") {
 			return
 		}
 		ok = true
