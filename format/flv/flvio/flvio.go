@@ -274,9 +274,12 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 	}
 
 	if !t.IsExHeader {
-		if t.FrameType == FRAME_INTER || t.FrameType == FRAME_KEY {
+		if t.CodecID != VIDEO_H264 {
+			// other legacy codecs (e.g. Sorenson H.263, VP6) have no further header fields here
+			t.PacketType = PKTTYPE_CODED_FRAMES
+		} else if t.FrameType == FRAME_INTER || t.FrameType == FRAME_KEY {
 			if len(b) < n+4 {
-				err = fmt.Errorf("videodata: parse invalid: neither interframe nor keyframe")
+				err = fmt.Errorf("videodata: parse invalid: not enough bytes for the AVC header")
 				return
 			}
 			t.AVCPacketType = b[n]
@@ -359,10 +362,12 @@ func (t Tag) videoFillHeader(b []byte) (n int) {
 		flags := t.FrameType<<4 | t.CodecID
 		b[n] = flags
 		n++
-		b[n] = t.AVCPacketType
-		n++
-		pio.PutI24BE(b[n:], compositionTimeSI24(t.CompositionTime))
-		n += 3
+		if t.CodecID == VIDEO_H264 {
+			b[n] = t.AVCPacketType
+			n++
+			pio.PutI24BE(b[n:], compositionTimeSI24(t.CompositionTime))
+			n += 3
+		}
 	}
 
 	//fmt.Printf("videoFillHeader: PacketType: %d\n%s\n", t.PacketType, hex.Dump(b[:n]))

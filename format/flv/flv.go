@@ -200,7 +200,7 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 					prober.CacheTag(tag, timestamp)
 				}
 			}
-		} else {
+		} else if tag.CodecID == flvio.VIDEO_H264 {
 			switch tag.AVCPacketType {
 			case flvio.AVC_SEQHDR:
 				if !prober.GotVideo {
@@ -292,7 +292,10 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
 		if !tag.IsExHeader {
-			return av.H264
+			if tag.CodecID == flvio.VIDEO_H264 {
+				return av.H264
+			}
+			return 0
 		}
 		switch tag.FourCC {
 		case flvio.FOURCC_HEVC:

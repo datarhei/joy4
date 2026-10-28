@@ -195,3 +195,38 @@ func TestProberCachedWithoutStream(t *testing.T) {
 	// the cached video frame is dropped
 	require.True(t, prober.Empty())
 }
+
+func TestProberLegacyCodec(t *testing.T) {
+	// the metadata announces audio and video, the video is Sorenson H.263 (codec id 2)
+	prober := NewProber(4)
+	prober.HasAudio = true
+	prober.HasVideo = true
+
+	h263 := func(data []byte) flvio.Tag {
+		tag := flvio.Tag{Type: flvio.TAG_VIDEO}
+		_, err := tag.ParseHeader(append([]byte{0x12}, data...))
+		require.NoError(t, err)
+		tag.Data = data
+		return tag
+	}
+
+	// the first byte of H.263 data would be AVC_SEQHDR, the second AVC_NALU
+	require.NoError(t, prober.PushTag(h263([]byte{0x00, 0x00, 0x84, 0x00}), 0))
+	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_SEQHDR, []byte{0x12, 0x10}), 0))
+	require.NoError(t, prober.PushTag(h263([]byte{0x01, 0x00, 0x84, 0x00}), 40))
+	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_RAW, []byte{0xAA}), 23))
+	require.True(t, prober.Probed())
+
+	require.Len(t, prober.Streams, 1)
+	require.Equal(t, av.AAC, prober.Streams[0].Type())
+
+	_, ok := prober.TagToPacket(h263([]byte{0x01, 0x02}), 80)
+	require.False(t, ok)
+
+	// only the audio packet is cached
+	require.False(t, prober.Empty())
+	pkt := prober.PopPacket()
+	require.Equal(t, int8(0), pkt.Idx)
+	require.Equal(t, []byte{0xAA}, pkt.Data)
+	require.True(t, prober.Empty())
+}
