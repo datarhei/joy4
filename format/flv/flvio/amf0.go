@@ -53,27 +53,6 @@ func fillAMF0Number(b []byte, f float64) int {
 }
 
 const (
-	amf3undefinedmarker = iota
-	amf3nullmarker
-	amf3falsemarker
-	amf3truemarker
-	amf3integermarker
-	amf3doublemarker
-	amf3stringmarker
-	amf3xmldocmarker
-	amf3datemarker
-	amf3arraymarker
-	amf3objectmarker
-	amf3xmlmarker
-	amf3bytearraymarker
-	amf3vectorintmarker
-	amf3vectoruintmarker
-	amf3vectordoublemarker
-	amf3vectorobjectmarker
-	amf3dictionarymarker
-)
-
-const (
 	numbermarker = iota
 	booleanmarker
 	stringmarker
