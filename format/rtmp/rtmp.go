@@ -64,6 +64,11 @@ type DialOptions struct {
 	// TLSConfig is the TLS configuration for rtmps:// URLs. If nil, the default configuration is used.
 	// If ServerName is not set, the host of the URL is used.
 	TLSConfig *tls.Config
+
+	// App is the application name that is sent with connect, for an application name with more than one
+	// segment (e.g. "app/instance"). The path of the URL must start with it, the rest of the path is the
+	// stream name. If empty, the application name is the first segment of the path (see SplitPath).
+	App string
 }
 
 func Dial(uri string, options DialOptions) (conn *Conn, err error) {
@@ -74,6 +79,12 @@ func DialTimeout(uri string, timeout time.Duration, options DialOptions) (conn *
 	var u *url.URL
 	if u, err = ParseURL(uri); err != nil {
 		return
+	}
+
+	if len(options.App) != 0 {
+		if _, _, err = splitAppPath(u, options.App); err != nil {
+			return
+		}
 	}
 
 	dailer := net.Dialer{Timeout: timeout}
@@ -99,6 +110,7 @@ func DialTimeout(uri string, timeout time.Duration, options DialOptions) (conn *
 
 	conn = NewConn(netconn)
 	conn.URL = u
+	conn.app = options.App
 	conn.prober = flv.NewProber(options.MaxProbePacketCount)
 	if options.DebugChunks != nil {
 		conn.debugChunks = options.DebugChunks(netconn)
@@ -316,12 +328,8 @@ func (s *Server) Serve(listener net.Listener) error {
 			fmt.Println("rtmp: server: accepted")
 		}
 
-		go func(conn net.Conn) {
-			err := s.HandleNetConn(conn)
-			if Debug {
-				fmt.Println("rtmp: server: client closed err:", err)
-			}
-		}(netconn)
+		// HandleNetConn logs the error
+		go s.HandleNetConn(netconn)
 	}
 }
 
@@ -358,6 +366,9 @@ const (
 
 type Conn struct {
 	URL *url.URL
+
+	// the application name of a client, if it is not the first segment of the path of the URL
+	app string
 
 	authorize func(conn *Conn) error
 
@@ -712,7 +723,7 @@ func (conn *Conn) Close() (err error) {
 			return
 		}
 
-		_, publishpath := SplitPath(conn.URL)
+		_, publishpath := conn.splitPath()
 
 		// don't wait long for a peer that doesn't read anymore
 		conn.netconn.SetWriteIdleTimeout(time.Second)
@@ -809,6 +820,10 @@ func (conn *Conn) pollMsg() (err error) {
 	}
 }
 
+// SplitPath splits the path of the URL into the application name and the stream name. The application name
+// is the first segment of the path, the stream name is the rest including the query, e.g. "app" and
+// "instance/stream?token=x" for rtmp://host/app/instance/stream?token=x. FFmpeg would take "app/instance"
+// as the application name. Use DialOptions.App for an application name with more than one segment.
 func SplitPath(u *url.URL) (app, stream string) {
 	pathsegs := strings.SplitN(u.RequestURI(), "/", 3)
 	if len(pathsegs) > 1 {
@@ -820,8 +835,33 @@ func SplitPath(u *url.URL) (app, stream string) {
 	return
 }
 
-func getTcUrl(u *url.URL) string {
-	app, _ := SplitPath(u)
+// splitAppPath splits the path of the URL into the given application name and the stream name. The path must
+// start with the application name.
+func splitAppPath(u *url.URL, app string) (string, string, error) {
+	app = strings.Trim(app, "/")
+	uri := u.RequestURI()
+	prefix := "/" + app
+	if !strings.HasPrefix(uri, prefix) {
+		return "", "", fmt.Errorf("rtmp: the path of the URL doesn't start with the app %q", app)
+	}
+	stream := uri[len(prefix):]
+	if len(stream) != 0 && stream[0] != '/' {
+		return "", "", fmt.Errorf("rtmp: the path of the URL doesn't start with the app %q", app)
+	}
+	return app, strings.TrimPrefix(stream, "/"), nil
+}
+
+// splitPath returns the application name and the stream name of a client.
+func (conn *Conn) splitPath() (app, stream string) {
+	if len(conn.app) != 0 {
+		// the URL has been checked in DialTimeout
+		app, stream, _ = splitAppPath(conn.URL, conn.app)
+		return
+	}
+	return SplitPath(conn.URL)
+}
+
+func getTcUrl(u *url.URL, app string) string {
 	nu := *u
 	nu.Path = "/" + app
 	return nu.String()
@@ -1230,7 +1270,7 @@ func (conn *Conn) writeConnect(path string) (err error) {
 		flvio.AMFMap{
 			"app":                path,
 			"flashVer":           "MAC 22,0,0,192",
-			"tcUrl":              getTcUrl(conn.URL),
+			"tcUrl":              getTcUrl(conn.URL, path),
 			"fpad":               false,
 			"capabilities":       15,
 			"audioCodecs":        4071,
@@ -1331,7 +1371,7 @@ func statusDescription(info flvio.AMFMap) string {
 }
 
 func (conn *Conn) connectPublish() (err error) {
-	connectpath, publishpath := SplitPath(conn.URL)
+	connectpath, publishpath := conn.splitPath()
 
 	if err = conn.writeConnect(connectpath); err != nil {
 		return
@@ -1393,7 +1433,7 @@ func (conn *Conn) connectPublish() (err error) {
 }
 
 func (conn *Conn) connectPlay() (err error) {
-	connectpath, playpath := SplitPath(conn.URL)
+	connectpath, playpath := conn.splitPath()
 
 	if err = conn.writeConnect(connectpath); err != nil {
 		return
@@ -1859,6 +1899,9 @@ func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
 		msgtypeid = msgtypeidVideoMsg
 		csid = 7
 		data = tag.Data
+
+	default:
+		return fmt.Errorf("rtmp: invalid tag type %d, only audio and video are allowed", tag.Type)
 	}
 
 	// RTMP timestamps have 32 bits and wrap around at 2^32
@@ -1882,6 +1925,7 @@ func (conn *Conn) writeAVTag(tag flvio.Tag, ts int64) (err error) {
 		return
 	}
 
+	// every frame is flushed right away (one write per frame) for the lowest latency of a live stream
 	err = conn.bufw.Flush()
 
 	return

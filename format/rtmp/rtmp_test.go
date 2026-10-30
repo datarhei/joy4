@@ -18,6 +18,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2945,4 +2946,97 @@ func TestClientConnectFourCC(t *testing.T) {
 
 	require.Equal(t, flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1"}, params["fourCcList"])
 	require.Equal(t, flvio.AMFMap{"av01": 4.0, "vp09": 4.0, "hvc1": 4.0, "vvc1": 4.0}, params["videoFourCcInfoMap"])
+}
+
+func TestWriteAVTagInvalidType(t *testing.T) {
+	conn, buf := newWriteConn()
+
+	err := conn.writeAVTag(flvio.Tag{Type: flvio.TAG_SCRIPTDATA, Data: []byte{0x01}}, 0)
+	require.ErrorContains(t, err, "invalid tag type 18")
+	require.NoError(t, conn.bufw.Flush())
+	require.Empty(t, buf.Bytes())
+}
+
+func TestSplitAppPath(t *testing.T) {
+	tests := []struct {
+		url    string
+		app    string
+		ok     bool
+		stream string
+	}{
+		{"rtmp://localhost/live/inst/test", "live/inst", true, "test"},
+		{"rtmp://localhost/live/inst/test?token=x", "/live/inst/", true, "test?token=x"},
+		{"rtmp://localhost/live/inst/a/b", "live/inst", true, "a/b"},
+		{"rtmp://localhost/live/inst", "live/inst", true, ""},
+		{"rtmp://localhost/live/test", "live", true, "test"},
+		{"rtmp://localhost/live/instance/test", "live/inst", false, ""},
+		{"rtmp://localhost/other/test", "live", false, ""},
+	}
+
+	for _, test := range tests {
+		u, err := ParseURL(test.url)
+		require.NoError(t, err)
+
+		app, stream, err := splitAppPath(u, test.app)
+		if !test.ok {
+			require.Error(t, err, test.url)
+			continue
+		}
+		require.NoError(t, err, test.url)
+		require.Equal(t, strings.Trim(test.app, "/"), app, test.url)
+		require.Equal(t, test.stream, stream, test.url)
+	}
+
+	// the URL is checked before connecting
+	_, err := Dial("rtmp://localhost:1/other/test", DialOptions{App: "live"})
+	require.ErrorContains(t, err, `doesn't start with the app "live"`)
+}
+
+func TestClientApp(t *testing.T) {
+	tests := []struct {
+		app           string
+		expectedApp   string
+		expectedTcUrl string
+		stream        string
+	}{
+		{"", "live", "rtmp://localhost:1935/live", "inst/test"},
+		{"live/inst", "live/inst", "rtmp://localhost:1935/live/inst", "test"},
+	}
+
+	for _, test := range tests {
+		conn := newScriptedClient(t, concat(
+			connectResult, createStreamResultPublish,
+			statusMessage("onStatus", 0, "status", "NetStream.Publish.Start", ""),
+		))
+		u, err := ParseURL("rtmp://localhost/live/inst/test")
+		require.NoError(t, err)
+		conn.URL = u
+		conn.app = test.app
+		buf := &bytes.Buffer{}
+		conn.bufw = bufio.NewWriter(buf)
+
+		err = conn.prepare(stageCommandDone, prepareWriting)
+		require.NoError(t, err)
+
+		rconn := newReadConn(buf.Bytes())
+		var connect flvio.AMFMap
+		var publish []interface{}
+		for publish == nil {
+			err := rconn.pollMsg()
+			require.NoError(t, err)
+			if !rconn.gotcommand {
+				continue
+			}
+			switch rconn.commandname {
+			case "connect":
+				connect = rconn.commandobj
+			case "publish":
+				publish = rconn.commandparams
+			}
+		}
+
+		require.Equal(t, test.expectedApp, connect["app"], test.app)
+		require.Equal(t, test.expectedTcUrl, connect["tcUrl"], test.app)
+		require.Equal(t, test.stream, publish[0], test.app)
+	}
 }

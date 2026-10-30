@@ -66,13 +66,13 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 43. [x] **`Conn` is not safe for concurrent reads and writes.** The read path writes Acks and Ping responses through the shared `bufw` and `writebuf`. Any user who reads and writes at the same time (needed to fix #24/#26) will corrupt output. A write mutex is needed. This is also needed for reading from the socket of a player during playback (#24).
 44. [x] **Unsynchronized server shutdown.** `Server.Close` races with `Serve` on `listener`/`doneChan`, and calling `Close` twice can panic. Active connections are not closed.
 45. [x] **Leaking `Handler` helpers.** `ServerMuxer` and `ServerDemuxer` leak the server, and they block forever on unbuffered channels for a second client or when `ListenAndServe` returns. They now serve exactly one client: the listener is closed after the first client, further clients are rejected, listen errors are returned, and closing the returned connection ends everything.
-46. [ ] **Minor:**
-   - `writeAVTag` flushes after every frame, which is one syscall per frame.
-   - The error is logged twice (`HandleNetConn` and `Serve`).
-   - `writeConnect` duplicates the WindowAckSize handling.
-   - `writeAVTag` gives csid 0 to non-A/V tags.
-   - `SplitPath` puts everything after the first segment into the stream name (`app/instance` ambiguity).
-   - There are no unit tests in `format/rtmp`.
+46. [x] **Minor:**
+   - `writeAVTag` flushes after every frame, which is one syscall per frame. Kept on purpose: it gives the lowest latency for a live stream, batching would only help when many packets are written back-to-back. Documented in the code.
+   - The error is logged twice (`HandleNetConn` and `Serve`). Fixed: only `HandleNetConn` logs it.
+   - `writeConnect` duplicates the WindowAckSize handling. Already gone since #25: `writeConnect` waits with `waitResult`, which leaves the WindowAckSize to `handleMsg`.
+   - `writeAVTag` gives csid 0 to non-A/V tags. Fixed: it returns an error for other tag types (not reachable through `WriteHeader`/`WritePacket`).
+   - `SplitPath` puts everything after the first segment into the stream name (`app/instance` ambiguity). Kept as the default (documented in `SplitPath`). New `DialOptions.App` sets an application name with more than one segment, like FFmpeg's `-rtmp_app`; the path of the URL must start with it, the rest is the stream name. FFmpeg in listen mode with rtmp://host/live/inst/test warns "App field don't match up: live <-> live/inst" for the default and accepts the connect with `App: "live/inst"`.
+   - There are no unit tests in `format/rtmp`. Done along the way of the other findings.
 48. [x] **Publishing client doesn't end the stream on Close.** `Conn.Close` of a publishing client only closes the TCP connection, without sending `FCUnpublish` and `deleteStream` first as FFmpeg and OBS do. A server that reacts to these commands (e.g. joy4 since #24) sees a broken connection instead of the end of the stream. (FFmpeg as receiver with `-listen 1` reports "Error during demuxing: Input/output error" for every publisher, also for FFmpeg itself, as it doesn't handle these commands in listen mode.)
 49. [x] **Broken examples.** Two examples don't compile: `examples/rtmp_publish` calls `rtmp.Dial` without the `DialOptions` argument (added in 09a60de), and `examples/rtmp_server_channels` subtracts an `int64` (`pkt.Time`) from a `time.Duration`. Fixed: `rtmp_publish` passes `rtmp.DialOptions{}`, and `rtmp_server_channels` keeps the last packet time as `int64` and converts the difference from milliseconds to a `time.Duration`. The expired `examples/rtmp_server/cert.pem` (January 2022, no subject alternative names) turned out to be a local file only: `*.pem` is in `examples/rtmp_server/.gitignore` and was never committed, so there is nothing to change in the repository.
 
