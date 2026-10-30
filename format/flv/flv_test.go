@@ -3,8 +3,11 @@ package flv
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/datarhei/joy4/av"
+	"github.com/datarhei/joy4/codec"
+	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/codec/fake"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
@@ -348,4 +351,54 @@ func TestColorInfoToTag(t *testing.T) {
 	// not defined for H.264
 	_, ok := ColorInfoToTag(info, fake.CodecData{CodecType_: av.H264})
 	require.False(t, ok)
+}
+
+func TestNewMetadataByStreamsNellymoser(t *testing.T) {
+	stream := codec.NewNellymoserCodecData(16000, av.CH_MONO)
+
+	duration, err := stream.PacketDuration(make([]byte, 128))
+	require.NoError(t, err)
+	require.Equal(t, 32*time.Millisecond, duration)
+
+	metadata, err := NewMetadataByStreams([]av.CodecData{stream})
+	require.NoError(t, err)
+	require.Equal(t, flvio.AMFMap{"audiocodecid": flvio.SOUND_NELLYMOSER, "audiosamplerate": 16000}, metadata)
+}
+
+func TestAACTagFlags(t *testing.T) {
+	for _, channels := range []uint{1, 2, 6} {
+		stream, err := aacparser.NewCodecDataFromMPEG4AudioConfig(aacparser.MPEG4AudioConfig{
+			ObjectType:    aacparser.AOT_AAC_LC,
+			SampleRate:    48000,
+			ChannelConfig: channels,
+		})
+		require.NoError(t, err)
+		require.Equal(t, int(channels), stream.ChannelLayout().Count())
+
+		// AAC, 44 kHz, 16 bit, stereo, as required by the FLV spec
+		b := make([]byte, 16)
+
+		tag, ok, err := CodecDataToTag(stream)
+		require.NoError(t, err)
+		require.True(t, ok)
+		n := tag.FillHeader(b)
+		require.Equal(t, []byte{0xAF, flvio.AAC_SEQHDR}, b[:n], "%d channels", channels)
+
+		tag, _ = PacketToTag(av.Packet{Data: []byte{0x01}}, stream)
+		n = tag.FillHeader(b)
+		require.Equal(t, []byte{0xAF, flvio.AAC_RAW}, b[:n], "%d channels", channels)
+
+		// the channels are taken from the AudioSpecificConfig
+		buf := &bytes.Buffer{}
+		muxer := NewMuxer(buf)
+		require.NoError(t, muxer.WriteHeader([]av.CodecData{stream}))
+		require.NoError(t, muxer.WritePacket(av.Packet{Data: []byte{0x01}}))
+		require.NoError(t, muxer.WriteTrailer())
+
+		streams, err := NewDemuxer(bytes.NewReader(buf.Bytes())).Streams()
+		require.NoError(t, err)
+		require.Len(t, streams, 1)
+		require.Equal(t, int(channels), streams[0].(av.AudioCodecData).ChannelLayout().Count())
+		require.Equal(t, 48000, streams[0].(av.AudioCodecData).SampleRate())
+	}
 }

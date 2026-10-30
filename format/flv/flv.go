@@ -10,7 +10,6 @@ import (
 	"github.com/datarhei/joy4/codec"
 	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/codec/av1parser"
-	"github.com/datarhei/joy4/codec/fake"
 	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/codec/hevcparser"
 	"github.com/datarhei/joy4/codec/vp9parser"
@@ -66,6 +65,9 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 
 			case av.SPEEX:
 				metadata["audiocodecid"] = flvio.SOUND_SPEEX
+
+			case av.NELLYMOSER:
+				metadata["audiocodecid"] = flvio.SOUND_NELLYMOSER
 
 			default:
 				err = fmt.Errorf("flv: metadata: unsupported audio codecType=%v", stream.Type())
@@ -272,12 +274,7 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 
 		case flvio.SOUND_NELLYMOSER:
 			if !prober.GotAudio {
-				stream := fake.CodecData{
-					CodecType_:     av.NELLYMOSER,
-					SampleRate_:    16000,
-					SampleFormat_:  av.S16,
-					ChannelLayout_: tag.ChannelLayout(),
-				}
+				stream := codec.NewNellymoserCodecData(16000, tag.ChannelLayout())
 				prober.AudioStreamIdx = len(prober.Streams)
 				prober.Streams = append(prober.Streams, stream)
 				prober.GotAudio = true
@@ -550,24 +547,16 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 
 	case av.AAC:
 		aac := stream.(aacparser.CodecData)
+		// the FLV spec requires 44 kHz and stereo for AAC, the actual sample rate and
+		// channels are in the AudioSpecificConfig
 		tag := flvio.Tag{
 			Type:          flvio.TAG_AUDIO,
 			SoundFormat:   flvio.SOUND_AAC,
 			SoundRate:     flvio.SOUND_44Khz,
+			SoundSize:     flvio.SOUND_16BIT,
+			SoundType:     flvio.SOUND_STEREO,
 			AACPacketType: flvio.AAC_SEQHDR,
 			Data:          aac.MPEG4AudioConfigBytes(),
-		}
-		switch aac.SampleFormat().BytesPerSample() {
-		case 1:
-			tag.SoundSize = flvio.SOUND_8BIT
-		default:
-			tag.SoundSize = flvio.SOUND_16BIT
-		}
-		switch aac.ChannelLayout().Count() {
-		case 1:
-			tag.SoundType = flvio.SOUND_MONO
-		case 2:
-			tag.SoundType = flvio.SOUND_STEREO
 		}
 		ok = true
 		_tag = tag
@@ -699,25 +688,15 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 		}
 
 	case av.AAC:
+		// see CodecDataToTag
 		tag = flvio.Tag{
 			Type:          flvio.TAG_AUDIO,
 			SoundFormat:   flvio.SOUND_AAC,
 			SoundRate:     flvio.SOUND_44Khz,
+			SoundSize:     flvio.SOUND_16BIT,
+			SoundType:     flvio.SOUND_STEREO,
 			AACPacketType: flvio.AAC_RAW,
 			Data:          pkt.Data,
-		}
-		astream := stream.(av.AudioCodecData)
-		switch astream.SampleFormat().BytesPerSample() {
-		case 1:
-			tag.SoundSize = flvio.SOUND_8BIT
-		default:
-			tag.SoundSize = flvio.SOUND_16BIT
-		}
-		switch astream.ChannelLayout().Count() {
-		case 1:
-			tag.SoundType = flvio.SOUND_MONO
-		case 2:
-			tag.SoundType = flvio.SOUND_STEREO
 		}
 
 	case av.SPEEX:
