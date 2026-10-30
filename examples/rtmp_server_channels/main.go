@@ -22,7 +22,7 @@ type FrameDropper struct {
 	skipping     bool
 	DelaySkip    time.Duration
 	lasttime     time.Time
-	lastpkttime  time.Duration
+	lastpkttime  int64
 	delay        time.Duration
 	SkipInterval int
 }
@@ -32,7 +32,7 @@ func (self *FrameDropper) ModifyPacket(pkt *av.Packet, streams []av.CodecData, v
 		now := time.Now()
 		if !self.lasttime.IsZero() {
 			realdiff := now.Sub(self.lasttime)
-			pktdiff := pkt.Time - self.lastpkttime
+			pktdiff := time.Duration(pkt.Time-self.lastpkttime) * time.Millisecond
 			self.delay += realdiff - pktdiff
 		}
 		self.lasttime = time.Now()

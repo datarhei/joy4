@@ -15,7 +15,7 @@ func init() {
 
 func main() {
 	file, _ := avutil.Open("projectindex.flv")
-	conn, _ := rtmp.Dial("rtmp://localhost:1936/app/publish")
+	conn, _ := rtmp.Dial("rtmp://localhost:1936/app/publish", rtmp.DialOptions{})
 	// conn, _ := avutil.Create("rtmp://localhost:1936/app/publish")
 
 	demuxer := &pktque.FilterDemuxer{Demuxer: file, Filter: &pktque.Walltime{}}
