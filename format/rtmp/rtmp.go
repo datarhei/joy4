@@ -1206,6 +1206,12 @@ func (conn *Conn) probe() (err error) {
 		}
 	}
 
+	// without any stream, the reason why the tags were invalid is more useful than an empty stream list
+	if len(conn.prober.Streams) == 0 && conn.prober.Err() != nil {
+		err = fmt.Errorf("rtmp: no stream probed: %w", conn.prober.Err())
+		return
+	}
+
 	conn.streams = conn.prober.Streams
 	conn.stage++
 	return
@@ -2516,14 +2522,7 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 			metadata, ok := conn.datamsgvals[metaindex].(flvio.AMFMap)
 			if ok {
 				conn.metadata = metadata
-
-				if _, hasVideo := metadata["videocodecid"]; hasVideo {
-					conn.prober.HasVideo = true
-				}
-
-				if _, hasAudio := metadata["audiocodecid"]; hasAudio {
-					conn.prober.HasAudio = true
-				}
+				conn.prober.PushMetadata(metadata)
 			}
 		}
 

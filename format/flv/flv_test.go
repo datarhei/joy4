@@ -353,16 +353,142 @@ func TestColorInfoToTag(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestNewMetadataByStreamsNellymoser(t *testing.T) {
-	stream := codec.NewNellymoserCodecData(16000, av.CH_MONO)
+func TestNellymoserTags(t *testing.T) {
+	tests := []struct {
+		sampleRate    int
+		channelLayout av.ChannelLayout
+		soundFormat   uint8
+		soundRate     uint8
+		soundType     uint8
+	}{
+		{8000, av.CH_MONO, flvio.SOUND_NELLYMOSER_8KHZ_MONO, 0, flvio.SOUND_MONO},
+		{16000, av.CH_MONO, flvio.SOUND_NELLYMOSER_16KHZ_MONO, 0, flvio.SOUND_MONO},
+		{5512, av.CH_MONO, flvio.SOUND_NELLYMOSER, flvio.SOUND_5_5Khz, flvio.SOUND_MONO},
+		{11025, av.CH_MONO, flvio.SOUND_NELLYMOSER, flvio.SOUND_11Khz, flvio.SOUND_MONO},
+		{22050, av.CH_MONO, flvio.SOUND_NELLYMOSER, flvio.SOUND_22Khz, flvio.SOUND_MONO},
+		{44100, av.CH_MONO, flvio.SOUND_NELLYMOSER, flvio.SOUND_44Khz, flvio.SOUND_MONO},
+		{44100, av.CH_STEREO, flvio.SOUND_NELLYMOSER, flvio.SOUND_44Khz, flvio.SOUND_STEREO},
+	}
 
-	duration, err := stream.PacketDuration(make([]byte, 128))
-	require.NoError(t, err)
-	require.Equal(t, 32*time.Millisecond, duration)
+	for _, test := range tests {
+		stream := codec.NewNellymoserCodecData(test.sampleRate, test.channelLayout)
 
-	metadata, err := NewMetadataByStreams([]av.CodecData{stream})
-	require.NoError(t, err)
-	require.Equal(t, flvio.AMFMap{"audiocodecid": flvio.SOUND_NELLYMOSER, "audiosamplerate": 16000}, metadata)
+		metadata, err := NewMetadataByStreams([]av.CodecData{stream})
+		require.NoError(t, err)
+		require.Equal(t, flvio.AMFMap{"audiocodecid": int(test.soundFormat), "audiosamplerate": test.sampleRate}, metadata)
+
+		tag, _ := PacketToTag(av.Packet{Data: make([]byte, 64)}, stream)
+		require.Equal(t, test.soundFormat, tag.SoundFormat, "%d Hz", test.sampleRate)
+		require.Equal(t, test.soundRate, tag.SoundRate, "%d Hz", test.sampleRate)
+		require.Equal(t, test.soundType, tag.SoundType, "%d Hz", test.sampleRate)
+
+		prober := NewProber(0)
+		prober.HasAudio = true
+		require.NoError(t, prober.PushTag(tag, 0))
+		require.True(t, prober.Probed())
+		require.Len(t, prober.Streams, 1)
+
+		probed := prober.Streams[0].(av.AudioCodecData)
+		require.Equal(t, av.NELLYMOSER, probed.Type())
+		require.Equal(t, test.sampleRate, probed.SampleRate(), "%d Hz", test.sampleRate)
+		require.Equal(t, test.channelLayout, probed.ChannelLayout(), "%d Hz", test.sampleRate)
+
+		// 256 samples
+		duration, err := probed.PacketDuration(make([]byte, 64))
+		require.NoError(t, err)
+		require.Equal(t, time.Duration(256)*time.Second/time.Duration(test.sampleRate), duration)
+
+		pkt, ok := prober.TagToPacket(tag, 0)
+		require.True(t, ok)
+		require.Len(t, pkt.Data, 64)
+	}
+}
+
+func TestProberSpeexNellymoserFrames(t *testing.T) {
+	audioTags := map[string]flvio.Tag{
+		"speex":      {Type: flvio.TAG_AUDIO, SoundFormat: flvio.SOUND_SPEEX},
+		"nellymoser": {Type: flvio.TAG_AUDIO, SoundFormat: flvio.SOUND_NELLYMOSER_16KHZ_MONO},
+	}
+
+	for name, audio := range audioTags {
+		// the audio frames arrive while probing still waits for the video
+		prober := NewProber(0)
+		prober.HasAudio = true
+		prober.HasVideo = true
+
+		for i := 0; i < 3; i++ {
+			audio.Data = []byte{byte(i)}
+			require.NoError(t, prober.PushTag(audio, int64(20*i)))
+		}
+		require.False(t, prober.Probed())
+
+		require.NoError(t, prober.PushTag(flvio.Tag{
+			Type:       flvio.TAG_VIDEO,
+			IsExHeader: true,
+			FrameType:  flvio.FRAME_KEY,
+			PacketType: flvio.PKTTYPE_SEQUENCE_START,
+			FourCC:     flvio.FOURCC_VVC,
+			Data:       []byte{0x01, 0x02, 0x03, 0x04},
+		}, 60))
+		require.True(t, prober.Probed())
+
+		for i := 0; i < 3; i++ {
+			require.False(t, prober.Empty(), name)
+			pkt := prober.PopPacket()
+			require.Equal(t, int8(prober.AudioStreamIdx), pkt.Idx, name)
+			require.Equal(t, []byte{byte(i)}, pkt.Data, name)
+			require.Equal(t, int64(20*i), pkt.Time, name)
+		}
+		require.True(t, prober.Empty(), name)
+	}
+}
+
+func TestProberPushMetadata(t *testing.T) {
+	tests := []struct {
+		metadata flvio.AMFMap
+		hasVideo bool
+		hasAudio bool
+	}{
+		{flvio.AMFMap{}, false, false},
+		{flvio.AMFMap{"videocodecid": 7.0, "audiocodecid": 10.0}, true, true},
+		{flvio.AMFMap{"videocodecid": "avc1", "audiocodecid": "mp4a"}, true, true},
+		{flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_HEVC)}, true, false},
+		{flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_VP9)}, true, false},
+		{flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_AV1)}, true, false},
+		{flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_VVC)}, true, false},
+		{flvio.AMFMap{"videocodecid": "hvc1"}, true, false},
+		{flvio.AMFMap{"audiocodecid": 11.0}, false, true},
+		{flvio.AMFMap{"audiocodecid": 4.0}, false, true},
+		{flvio.AMFMap{"audiocodecid": 5.0}, false, true},
+		{flvio.AMFMap{"audiocodecid": 6.0}, false, true},
+		// unsupported: H.263, VP6, MP3, ADPCM, Opus FourCC as a string
+		{flvio.AMFMap{"videocodecid": 2.0, "audiocodecid": 2.0}, false, false},
+		{flvio.AMFMap{"videocodecid": 4.0, "audiocodecid": 1.0}, false, false},
+		{flvio.AMFMap{"videocodecid": "VP62", "audiocodecid": ".mp3"}, false, false},
+		{flvio.AMFMap{"audiocodecid": "Opus"}, false, false},
+		{flvio.AMFMap{"videocodecid": nil, "audiocodecid": true}, false, false},
+	}
+
+	for _, test := range tests {
+		prober := NewProber(0)
+		prober.PushMetadata(test.metadata)
+		require.Equal(t, test.hasVideo, prober.HasVideo, "%v", test.metadata)
+		require.Equal(t, test.hasAudio, prober.HasAudio, "%v", test.metadata)
+	}
+}
+
+func TestProberErr(t *testing.T) {
+	prober := NewProber(0)
+	prober.HasVideo = true
+	require.NoError(t, prober.Err())
+
+	err := prober.PushTag(flvio.Tag{Type: flvio.TAG_VIDEO, CodecID: flvio.VIDEO_H264, AVCPacketType: flvio.AVC_SEQHDR, Data: []byte{0xFF}}, 0)
+	require.Error(t, err)
+	require.Equal(t, err, prober.Err())
+
+	// a later valid tag doesn't clear the error
+	require.NoError(t, prober.PushTag(flvio.Tag{Type: flvio.TAG_AUDIO, SoundFormat: flvio.SOUND_SPEEX}, 0))
+	require.Equal(t, err, prober.Err())
 }
 
 func TestAACTagFlags(t *testing.T) {

@@ -67,7 +67,7 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 				metadata["audiocodecid"] = flvio.SOUND_SPEEX
 
 			case av.NELLYMOSER:
-				metadata["audiocodecid"] = flvio.SOUND_NELLYMOSER
+				metadata["audiocodecid"] = int(nellymoserTag(stream).SoundFormat)
 
 			default:
 				err = fmt.Errorf("flv: metadata: unsupported audio codecType=%v", stream.Type())
@@ -101,6 +101,9 @@ type Prober struct {
 	// before the next packet after CachedPkts
 	cachedColorInfo  []*colorInfoUpdate
 	pendingColorInfo *colorInfoUpdate
+
+	// the last error of PushTag
+	lastErr error
 }
 
 type colorInfoUpdate struct {
@@ -132,6 +135,12 @@ func (prober *Prober) CacheTag(tag flvio.Tag, timestamp int64) {
 }
 
 func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
+	defer func() {
+		if err != nil {
+			prober.lastErr = err
+		}
+	}()
+
 	prober.PushedCount++
 
 	if prober.MaxProbePacketCount <= 0 {
@@ -269,22 +278,128 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 				prober.AudioStreamIdx = len(prober.Streams)
 				prober.Streams = append(prober.Streams, stream)
 				prober.GotAudio = true
-				prober.CacheTag(tag, timestamp)
 			}
+			prober.CacheTag(tag, timestamp)
 
-		case flvio.SOUND_NELLYMOSER:
+		case flvio.SOUND_NELLYMOSER, flvio.SOUND_NELLYMOSER_16KHZ_MONO, flvio.SOUND_NELLYMOSER_8KHZ_MONO:
 			if !prober.GotAudio {
-				stream := codec.NewNellymoserCodecData(16000, tag.ChannelLayout())
+				sampleRate, channelLayout := nellymoserFormat(tag)
+				stream := codec.NewNellymoserCodecData(sampleRate, channelLayout)
 				prober.AudioStreamIdx = len(prober.Streams)
 				prober.Streams = append(prober.Streams, stream)
 				prober.GotAudio = true
-				prober.CacheTag(tag, timestamp)
 			}
-
+			prober.CacheTag(tag, timestamp)
 		}
 	}
 
 	return
+}
+
+// Err returns the last error of PushTag, or nil.
+func (prober *Prober) Err() error {
+	return prober.lastErr
+}
+
+// PushMetadata sets HasVideo and HasAudio from the codec ids in the metadata (onMetaData), if they are
+// supported. An unsupported codec is not waited for, otherwise probing would only end after
+// MaxProbePacketCount tags.
+func (prober *Prober) PushMetadata(metadata flvio.AMFMap) {
+	if isSupportedVideoCodecID(metadata["videocodecid"]) {
+		prober.HasVideo = true
+	}
+	if isSupportedAudioCodecID(metadata["audiocodecid"]) {
+		prober.HasAudio = true
+	}
+}
+
+var supportedVideoFourCCs = [][4]byte{
+	{'a', 'v', 'c', '1'},
+	flvio.FOURCC_HEVC,
+	flvio.FOURCC_VP9,
+	flvio.FOURCC_AV1,
+	flvio.FOURCC_VVC,
+}
+
+// isSupportedVideoCodecID returns whether the videocodecid of the metadata is a supported codec. It is a
+// legacy codec id or a FourCC as a number (E-RTMP), or a FourCC as a string.
+func isSupportedVideoCodecID(id interface{}) bool {
+	switch id := id.(type) {
+	case float64:
+		if id == flvio.VIDEO_H264 {
+			return true
+		}
+		for _, fourcc := range supportedVideoFourCCs {
+			if id == flvio.FourCCToFloat(fourcc) {
+				return true
+			}
+		}
+	case string:
+		for _, fourcc := range supportedVideoFourCCs {
+			if id == string(fourcc[:]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isSupportedAudioCodecID returns whether the audiocodecid of the metadata is a supported codec. It is a
+// legacy codec id, or "mp4a" for AAC.
+func isSupportedAudioCodecID(id interface{}) bool {
+	switch id := id.(type) {
+	case float64:
+		switch id {
+		case flvio.SOUND_AAC, flvio.SOUND_SPEEX, flvio.SOUND_NELLYMOSER, flvio.SOUND_NELLYMOSER_16KHZ_MONO, flvio.SOUND_NELLYMOSER_8KHZ_MONO:
+			return true
+		}
+	case string:
+		return id == "mp4a"
+	}
+	return false
+}
+
+// soundRates are the sample rates of the SoundRate of an audio tag.
+var soundRates = []int{5512, 11025, 22050, 44100}
+
+// nellymoserFormat returns the sample rate and channel layout of a Nellymoser audio tag.
+func nellymoserFormat(tag flvio.Tag) (sampleRate int, channelLayout av.ChannelLayout) {
+	switch tag.SoundFormat {
+	case flvio.SOUND_NELLYMOSER_16KHZ_MONO:
+		return 16000, av.CH_MONO
+	case flvio.SOUND_NELLYMOSER_8KHZ_MONO:
+		return 8000, av.CH_MONO
+	}
+	return soundRates[tag.SoundRate&0x3], tag.ChannelLayout()
+}
+
+// nellymoserTag returns an audio tag with the SoundFormat and SoundRate for a Nellymoser stream, as FFmpeg
+// writes them: 16 kHz and 8 kHz have their own SoundFormat, the other sample rates are in the SoundRate.
+func nellymoserTag(stream av.AudioCodecData) flvio.Tag {
+	tag := flvio.Tag{
+		Type:      flvio.TAG_AUDIO,
+		SoundSize: flvio.SOUND_16BIT,
+	}
+
+	switch stream.SampleRate() {
+	case 16000:
+		tag.SoundFormat = flvio.SOUND_NELLYMOSER_16KHZ_MONO
+		return tag
+	case 8000:
+		tag.SoundFormat = flvio.SOUND_NELLYMOSER_8KHZ_MONO
+		return tag
+	}
+
+	tag.SoundFormat = flvio.SOUND_NELLYMOSER
+	for i, rate := range soundRates {
+		if stream.SampleRate() == rate {
+			tag.SoundRate = uint8(i)
+		}
+	}
+	if stream.ChannelLayout().Count() == 2 {
+		tag.SoundType = flvio.SOUND_STEREO
+	}
+	return tag
 }
 
 func (prober *Prober) Probed() (ok bool) {
@@ -332,7 +447,7 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 			return av.AAC
 		case flvio.SOUND_SPEEX:
 			return av.SPEEX
-		case flvio.SOUND_NELLYMOSER:
+		case flvio.SOUND_NELLYMOSER, flvio.SOUND_NELLYMOSER_16KHZ_MONO, flvio.SOUND_NELLYMOSER_8KHZ_MONO:
 			return av.NELLYMOSER
 		}
 	}
@@ -399,7 +514,7 @@ func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet
 			pkt.Data = tag.Data
 			pkt.IsKeyFrame = true
 
-		case flvio.SOUND_NELLYMOSER:
+		case flvio.SOUND_NELLYMOSER, flvio.SOUND_NELLYMOSER_16KHZ_MONO, flvio.SOUND_NELLYMOSER_8KHZ_MONO:
 			ok = true
 			pkt.Data = tag.Data
 			pkt.IsKeyFrame = true
@@ -707,11 +822,8 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 		}
 
 	case av.NELLYMOSER:
-		tag = flvio.Tag{
-			Type:        flvio.TAG_AUDIO,
-			SoundFormat: flvio.SOUND_NELLYMOSER,
-			Data:        pkt.Data,
-		}
+		tag = nellymoserTag(stream.(av.AudioCodecData))
+		tag.Data = pkt.Data
 	}
 
 	timestamp = flvio.TimeToTs(pkt.Time)
