@@ -59,7 +59,7 @@ Scope: `format/rtmp`, `format/flv`, `format/flv/flvio`. One commit per finding.
 39. [x] **Strings of exactly 65536 bytes are encoded wrongly.** The check is `<= 65536` (`amf0.go:126,199`), so the uint16 length overflows to 0. It should be `<= 65535`.
 40. [x] **Unsupported Go types encode to 0 bytes silently.** For example `map[string]interface{}`, `[]interface{}`, pointers. Inside an AMFMap, the key is then written with no value, which corrupts the message. That is reachable through `SetMetaData`. Return an error or panic.
 41. [x] **Unsupported markers.** Reference, typed-object and AMF3-switch markers fail the whole message. A metadata parse error kills the connection.
-    - [ ] References (0x07) are still not supported, they need the parser to keep track of the parsed objects. AMF3 (0x11) see #22.
+    - References (0x07) are still not supported, they need the parser to keep track of the parsed objects. AMF3 (0x11) see #22. Not required for now (decided 2026-11-02): FFmpeg, OBS (librtmp) and hardware encoders never write references, and FFmpeg, librtmp and nginx-rtmp can't parse them either. They would only come from Flash/AIR clients or Red5/FMS server-side code passing complex objects. A reference in a data message drops that message, in a command message it fails the connection.
 
 ## G. Concurrency / lifecycle / API
 42. [x] **Data race on the byte counters.** `TxBytes`/`RxBytes` are read from other goroutines without atomics.
