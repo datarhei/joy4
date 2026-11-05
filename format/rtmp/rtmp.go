@@ -430,7 +430,10 @@ type Conn struct {
 	msgdata     []byte
 	msgtypeid   uint8
 	datamsgvals []interface{}
-	avtag       flvio.Tag
+
+	// the audio or video tags of the last message that haven't been returned by pollAVTag yet, one per
+	// track of a multitrack message (E-RTMP v2)
+	avtags []flvio.Tag
 
 	metadata flvio.AMFMap
 
@@ -759,6 +762,12 @@ func (conn *Conn) pollAVTag() (tag flvio.Tag, err error) {
 	}
 
 	for {
+		if len(conn.avtags) != 0 {
+			tag = conn.avtags[0]
+			conn.avtags = conn.avtags[1:]
+			return
+		}
+
 		if err = conn.pollMsg(); err != nil {
 			return
 		}
@@ -790,7 +799,12 @@ func (conn *Conn) pollAVTag() (tag flvio.Tag, err error) {
 
 		switch conn.msgtypeid {
 		case msgtypeidVideoMsg, msgtypeidAudioMsg:
-			tag = conn.avtag
+			if len(conn.avtags) == 0 {
+				// a message without audio or video data (e.g. a video command frame)
+				return
+			}
+			tag = conn.avtags[0]
+			conn.avtags = conn.avtags[1:]
 			return
 		}
 	}
@@ -800,7 +814,7 @@ func (conn *Conn) pollMsg() (err error) {
 	conn.gotmsg = false
 	conn.gotcommand = false
 	conn.datamsgvals = nil
-	conn.avtag = flvio.Tag{}
+	conn.avtags = nil
 	for {
 		if err = conn.readChunk(); err != nil {
 			return
@@ -2607,7 +2621,9 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 			return
 		}
 		tag.Data = msgdata[n:]
-		conn.avtag = tag
+		if conn.avtags, err = flvio.SplitTracks(tag); err != nil {
+			return
+		}
 
 	case msgtypeidAudioMsg:
 		if len(msgdata) == 0 {
@@ -2619,7 +2635,9 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 			return
 		}
 		tag.Data = msgdata[n:]
-		conn.avtag = tag
+		if conn.avtags, err = flvio.SplitTracks(tag); err != nil {
+			return
+		}
 
 	case msgtypeidSetChunkSize:
 		if len(msgdata) < 4 {

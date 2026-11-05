@@ -774,3 +774,56 @@ func TestProberExAudioUnsupportedCodec(t *testing.T) {
 	require.Equal(t, av.VVC, prober.Streams[0].Type())
 	require.True(t, prober.Empty())
 }
+
+// flvTag returns an FLV tag with the data, including the header and the previous tag size.
+func flvTag(tagType uint8, timestamp int64, data []byte) []byte {
+	b := make([]byte, flvio.TagHeaderLength)
+	flvio.FillTagHeader(b, tagType, len(data), timestamp)
+	b = append(b, data...)
+	return append(b, byte((len(data)+flvio.TagHeaderLength)>>24), byte((len(data)+flvio.TagHeaderLength)>>16), byte((len(data)+flvio.TagHeaderLength)>>8), byte(len(data)+flvio.TagHeaderLength))
+}
+
+func TestDemuxerMultitrack(t *testing.T) {
+	recordA := decodeHex(t, avcRecord320x240)
+	recordB := decodeHex(t, avcRecord640x360)
+
+	file := make([]byte, flvio.FileHeaderLength+4)
+	flvio.FillFileHeader(file, flvio.FILE_HAS_AUDIO|flvio.FILE_HAS_VIDEO)
+	for _, tag := range [][]byte{
+		// track 0 with the legacy header, track 1 as OneTrack, as FFmpeg writes them
+		flvTag(flvio.TAG_VIDEO, 0, append([]byte{0x17, 0x00, 0x00, 0x00, 0x00}, recordA...)),
+		flvTag(flvio.TAG_VIDEO, 0, append([]byte{0x96, 0x00, 'a', 'v', 'c', '1', 0x01}, recordB...)),
+		flvTag(flvio.TAG_AUDIO, 0, []byte{0xAF, 0x00, 0x12, 0x10}),
+		flvTag(flvio.TAG_AUDIO, 0, []byte{0x95, 0x00, 'm', 'p', '4', 'a', 0x01, 0x11, 0x88}),
+		// both tracks in one message
+		flvTag(flvio.TAG_VIDEO, 0, []byte{0x96, 0x13, 'a', 'v', 'c', '1', 0x00, 0x00, 0x00, 0x01, 0xA0, 0x01, 0x00, 0x00, 0x01, 0xB0}),
+		flvTag(flvio.TAG_AUDIO, 0, []byte{0x95, 0x11, 'm', 'p', '4', 'a', 0x00, 0x00, 0x00, 0x01, 0xAA, 0x01, 0x00, 0x00, 0x01, 0xBB}),
+		// track 0 as OneTrack, and AVC with the ExVideoTagHeader and a composition time
+		flvTag(flvio.TAG_VIDEO, 40, []byte{0x96, 0x01, 'a', 'v', 'c', '1', 0x00, 0x00, 0x00, 0x28, 0xA1}),
+		flvTag(flvio.TAG_VIDEO, 40, []byte{0x96, 0x01, 'a', 'v', 'c', '1', 0x01, 0x00, 0x00, 0x28, 0xB1}),
+		flvTag(flvio.TAG_VIDEO, 80, []byte{0x91, 'a', 'v', 'c', '1', 0x00, 0x00, 0x14, 0xA2}),
+	} {
+		file = append(file, tag...)
+	}
+
+	demuxer := NewDemuxer(bytes.NewReader(file))
+	streams, err := demuxer.Streams()
+	require.NoError(t, err)
+	require.Len(t, streams, 2)
+	require.Equal(t, av.H264, streams[0].Type())
+	require.Equal(t, 320, streams[0].(av.VideoCodecData).Width())
+	require.Equal(t, av.AAC, streams[1].Type())
+
+	for i, expected := range []av.Packet{
+		{Idx: 0, Data: []byte{0xA0}, IsKeyFrame: true},
+		{Idx: 1, Data: []byte{0xAA}, IsKeyFrame: true},
+		{Idx: 0, Data: []byte{0xA1}, IsKeyFrame: true, Time: 40, CompositionTime: 40},
+		{Idx: 0, Data: []byte{0xA2}, IsKeyFrame: true, Time: 80, CompositionTime: 20},
+	} {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, expected, pkt, "packet %d", i)
+	}
+	_, err = demuxer.ReadPacket()
+	require.Error(t, err)
+}

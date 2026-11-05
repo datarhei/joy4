@@ -385,16 +385,6 @@ func TestAudioParseHeaderExHeaderModEx(t *testing.T) {
 	}
 }
 
-func TestAudioParseHeaderExHeaderMultitrack(t *testing.T) {
-	// multitrack isn't supported yet, the header ends after the packet type
-	tag := Tag{Type: TAG_AUDIO}
-	n, err := tag.ParseHeader([]byte{0x95, 0x00, 'm', 'p', '4', 'a', 0x01, 0xAA})
-	require.NoError(t, err)
-	require.Equal(t, 1, n)
-	require.True(t, tag.IsExHeader)
-	require.Equal(t, uint8(AUDIO_PKTTYPE_MULTITRACK), tag.PacketType)
-}
-
 func TestAudioParseHeaderLegacy(t *testing.T) {
 	tag := Tag{Type: TAG_AUDIO}
 	n, err := tag.ParseHeader([]byte{0xAF, 0x01, 0xAA})
@@ -425,5 +415,165 @@ func TestParseMultichannelConfig(t *testing.T) {
 	for _, b := range [][]byte{{}, {0x00}, {0x01, 0x06, 0x00, 0x00, 0x00}, {0x02, 0x02, 0x01}} {
 		_, err := ParseMultichannelConfig(b)
 		require.Error(t, err, "%x", b)
+	}
+}
+
+func TestParseHeaderMultitrackOneTrack(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		tagType    uint8
+		data       []byte
+		n          int
+		packetType uint8
+		fourCC     [4]byte
+		trackID    uint8
+		cts        int64
+	}{
+		// as FFmpeg writes the second video and audio track
+		{"video sequence start", TAG_VIDEO, []byte{0x96, 0x00, 'a', 'v', 'c', '1', 0x01, 0x01, 0xf4}, 7, PKTTYPE_SEQUENCE_START, FOURCC_AVC, 1, 0},
+		{"video coded frames x", TAG_VIDEO, []byte{0x96, 0x03, 'a', 'v', 'c', '1', 0x01, 0x00, 0x00}, 7, PKTTYPE_CODED_FRAMESX, FOURCC_AVC, 1, 0},
+		{"video coded frames", TAG_VIDEO, []byte{0x96, 0x01, 'h', 'v', 'c', '1', 0x02, 0x00, 0x00, 0x28, 0xAA}, 10, PKTTYPE_CODED_FRAMES, FOURCC_HEVC, 2, 40},
+		{"audio sequence start", TAG_AUDIO, []byte{0x95, 0x00, 'm', 'p', '4', 'a', 0x01, 0x11, 0x88}, 7, PKTTYPE_SEQUENCE_START, FOURCC_AAC, 1, 0},
+		{"audio multichannel config", TAG_AUDIO, []byte{0x95, 0x04, 'm', 'p', '4', 'a', 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x04}, 7, AUDIO_PKTTYPE_MULTICHANNEL_CONFIG, FOURCC_AAC, 1, 0},
+	} {
+		tag := Tag{Type: tc.tagType}
+		n, err := tag.ParseHeader(tc.data)
+		require.NoError(t, err, tc.name)
+		require.Equal(t, tc.n, n, tc.name)
+		require.True(t, tag.IsExHeader, tc.name)
+		require.True(t, tag.IsMultitrack, tc.name)
+		require.Equal(t, uint8(MULTITRACK_ONE_TRACK), tag.MultitrackType, tc.name)
+		require.Equal(t, tc.packetType, tag.PacketType, tc.name)
+		require.Equal(t, tc.fourCC, tag.FourCC, tc.name)
+		require.Equal(t, tc.trackID, tag.TrackID, tc.name)
+		require.Equal(t, tc.cts, tag.CompositionTime, tc.name)
+
+		tag.Data = tc.data[n:]
+		tags, err := SplitTracks(tag)
+		require.NoError(t, err, tc.name)
+		require.Equal(t, []Tag{tag}, tags, tc.name)
+
+		b := make([]byte, MaxTagSubHeaderLength)
+		require.Equal(t, tc.data[:n], b[:tag.FillHeader(b)], tc.name)
+
+		for i := 1; i < n; i++ {
+			tag := Tag{Type: tc.tagType}
+			_, err := tag.ParseHeader(tc.data[:i])
+			require.Error(t, err, "%s: %d bytes", tc.name, i)
+		}
+	}
+}
+
+func TestParseHeaderMultitrackManyTracks(t *testing.T) {
+	// HEVC coded frames of the tracks 0 and 1, each with its composition time
+	data := []byte{0x96, 0x11, 'h', 'v', 'c', '1',
+		0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x28, 0xA0, 0xA1,
+		0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x50, 0xB0,
+	}
+	tag := Tag{Type: TAG_VIDEO}
+	n, err := tag.ParseHeader(data)
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+	require.True(t, tag.IsMultitrack)
+	require.Equal(t, uint8(MULTITRACK_MANY_TRACKS), tag.MultitrackType)
+	require.Equal(t, uint8(FRAME_KEY), tag.FrameType)
+	require.Equal(t, uint8(PKTTYPE_CODED_FRAMES), tag.PacketType)
+	require.Equal(t, FOURCC_HEVC, tag.FourCC)
+
+	tag.Data = data[n:]
+	tags, err := SplitTracks(tag)
+	require.NoError(t, err)
+	require.Len(t, tags, 2)
+	for i, expected := range []struct {
+		trackID uint8
+		cts     int64
+		data    []byte
+	}{{0, 40, []byte{0xA0, 0xA1}}, {1, 80, []byte{0xB0}}} {
+		require.Equal(t, expected.trackID, tags[i].TrackID, "track %d", i)
+		require.Equal(t, expected.cts, tags[i].CompositionTime, "track %d", i)
+		require.Equal(t, expected.data, tags[i].Data, "track %d", i)
+		require.Equal(t, FOURCC_HEVC, tags[i].FourCC, "track %d", i)
+		require.Equal(t, uint8(FRAME_KEY), tags[i].FrameType, "track %d", i)
+	}
+
+	// a track is written as OneTrack
+	b := make([]byte, MaxTagSubHeaderLength)
+	require.Equal(t, []byte{0x96, 0x01, 'h', 'v', 'c', '1', 0x01, 0x00, 0x00, 0x50}, b[:tags[1].FillHeader(b)])
+
+	// every truncation of the tracks is an error, except at the end of a track
+	for i := n; i < len(data); i++ {
+		tag.Data = data[n:i]
+		_, err := SplitTracks(tag)
+		if i == n || i == n+9 {
+			require.NoError(t, err, "%d bytes", i)
+		} else {
+			require.Error(t, err, "%d bytes", i)
+		}
+	}
+}
+
+func TestParseHeaderMultitrackManyTracksManyCodecs(t *testing.T) {
+	// video: CodedFramesX of AVC (track 0) and HEVC (track 1)
+	data := []byte{0x96, 0x23,
+		'a', 'v', 'c', '1', 0x00, 0x00, 0x00, 0x01, 0xA0,
+		'h', 'v', 'c', '1', 0x01, 0x00, 0x00, 0x02, 0xB0, 0xB1,
+	}
+	tag := Tag{Type: TAG_VIDEO}
+	n, err := tag.ParseHeader(data)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.Equal(t, uint8(MULTITRACK_MANY_TRACKS_MANY_CODECS), tag.MultitrackType)
+	require.Equal(t, uint8(PKTTYPE_CODED_FRAMESX), tag.PacketType)
+
+	tag.Data = data[n:]
+	tags, err := SplitTracks(tag)
+	require.NoError(t, err)
+	require.Len(t, tags, 2)
+	require.Equal(t, FOURCC_AVC, tags[0].FourCC)
+	require.Equal(t, uint8(0), tags[0].TrackID)
+	require.Equal(t, []byte{0xA0}, tags[0].Data)
+	require.Equal(t, FOURCC_HEVC, tags[1].FourCC)
+	require.Equal(t, uint8(1), tags[1].TrackID)
+	require.Equal(t, []byte{0xB0, 0xB1}, tags[1].Data)
+
+	// audio: AAC (track 0) and Opus (track 1)
+	data = []byte{0x95, 0x21,
+		'm', 'p', '4', 'a', 0x00, 0x00, 0x00, 0x01, 0xA0,
+		'O', 'p', 'u', 's', 0x01, 0x00, 0x00, 0x01, 0xB0,
+	}
+	tag = Tag{Type: TAG_AUDIO}
+	n, err = tag.ParseHeader(data)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	tag.Data = data[n:]
+	tags, err = SplitTracks(tag)
+	require.NoError(t, err)
+	require.Len(t, tags, 2)
+	require.Equal(t, FOURCC_AAC, tags[0].FourCC)
+	require.Equal(t, []byte{0xA0}, tags[0].Data)
+	require.Equal(t, FOURCC_OPUS, tags[1].FourCC)
+	require.Equal(t, uint8(1), tags[1].TrackID)
+	require.Equal(t, []byte{0xB0}, tags[1].Data)
+
+	b := make([]byte, MaxTagSubHeaderLength)
+	require.Equal(t, []byte{0x95, 0x01, 'O', 'p', 'u', 's', 0x01}, b[:tags[1].FillHeader(b)])
+}
+
+func TestParseHeaderMultitrackInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tagType uint8
+		data    []byte
+	}{
+		{"nested", TAG_VIDEO, []byte{0x96, 0x06, 'a', 'v', 'c', '1', 0x01}},
+		{"nested", TAG_AUDIO, []byte{0x95, 0x05, 'm', 'p', '4', 'a', 0x01}},
+		{"unknown type", TAG_VIDEO, []byte{0x96, 0x31, 'a', 'v', 'c', '1', 0x01}},
+		{"unknown type", TAG_AUDIO, []byte{0x95, 0x31, 'm', 'p', '4', 'a', 0x01}},
+		{"no multitrack type", TAG_VIDEO, []byte{0x96}},
+		{"no multitrack type", TAG_AUDIO, []byte{0x95}},
+	} {
+		tag := Tag{Type: tc.tagType}
+		_, err := tag.ParseHeader(tc.data)
+		require.Error(t, err, "%s %d", tc.name, tc.tagType)
 	}
 }

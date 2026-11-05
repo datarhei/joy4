@@ -112,7 +112,7 @@ func TestReadChunkReassemblesMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint8(msgtypeidVideoMsg), conn.msgtypeid)
 	require.Equal(t, payload, conn.msgdata)
-	require.Equal(t, payload[5:], conn.avtag.Data)
+	require.Equal(t, payload[5:], conn.avtags[0].Data)
 	require.Equal(t, int64(40), conn.timestamp)
 }
 
@@ -305,13 +305,13 @@ func TestWriteAVTagExtendedTimestamp(t *testing.T) {
 		require.NoError(t, err, "ts %#x", ts)
 		require.Equal(t, uint8(msgtypeidVideoMsg), rconn.msgtypeid, "ts %#x", ts)
 		require.Equal(t, ts, rconn.timestamp, "ts %#x", ts)
-		require.Equal(t, data, rconn.avtag.Data, "ts %#x", ts)
+		require.Equal(t, data, rconn.avtags[0].Data, "ts %#x", ts)
 
 		err = rconn.pollMsg()
 		require.NoError(t, err, "ts %#x", ts)
 		require.Equal(t, uint8(msgtypeidVideoMsg), rconn.msgtypeid, "ts %#x", ts)
 		require.Equal(t, ts+40, rconn.timestamp, "ts %#x", ts)
-		require.Equal(t, data, rconn.avtag.Data, "ts %#x", ts)
+		require.Equal(t, data, rconn.avtags[0].Data, "ts %#x", ts)
 	}
 }
 
@@ -693,7 +693,7 @@ func TestWriteAVTagMaxMessageLength(t *testing.T) {
 	err = rconn.pollMsg()
 	require.NoError(t, err)
 	require.Equal(t, maxMessageLength, len(rconn.msgdata))
-	require.Equal(t, len(tag.Data), len(rconn.avtag.Data))
+	require.Equal(t, len(tag.Data), len(rconn.avtags[0].Data))
 
 	// one byte more
 	tag.Data = make([]byte, maxMessageLength-4)
@@ -3171,6 +3171,53 @@ func TestReadExAudio(t *testing.T) {
 	for i, expected := range []av.Packet{
 		{Data: []byte{0xA0}, Time: 0, IsKeyFrame: true},
 		{Data: []byte{0xA1}, Time: 23, IsKeyFrame: true},
+	} {
+		pkt, err := conn.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, expected, pkt, "packet %d", i)
+	}
+}
+
+func TestReadMultitrack(t *testing.T) {
+	// VVC and AAC with two tracks each, track 0 is read
+	video := func(timestamp uint32, payload ...byte) []byte {
+		return chunkMessage(6, timestamp, msgtypeidVideoMsg, 1, payload, 128)
+	}
+	audio := func(timestamp uint32, payload ...byte) []byte {
+		return chunkMessage(4, timestamp, msgtypeidAudioMsg, 1, payload, 128)
+	}
+
+	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"})
+	data = append(data, commandMessage("createStream", 2.0, nil)...)
+	data = append(data, commandMessage("publish", 3.0, nil, "test", "live")...)
+	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"videocodecid": "vvc1", "audiocodecid": "mp4a"})...)
+	data = concat(data,
+		// the sequence starts of both tracks in one message, track 1 first
+		video(0, 0x96, 0x10, 'v', 'v', 'c', '1', 0x01, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x01, 0x01),
+		audio(0, 0x95, 0x00, 'm', 'p', '4', 'a', 0x01, 0x11, 0x88),
+		audio(0, 0x95, 0x00, 'm', 'p', '4', 'a', 0x00, 0x12, 0x10),
+		video(0, 0x96, 0x13, 'v', 'v', 'c', '1', 0x01, 0x00, 0x00, 0x01, 0xB0, 0x00, 0x00, 0x00, 0x01, 0xA0),
+		audio(0, 0x95, 0x11, 'm', 'p', '4', 'a', 0x00, 0x00, 0x00, 0x01, 0xAA, 0x01, 0x00, 0x00, 0x01, 0xBB),
+		video(40, 0x96, 0x03, 'v', 'v', 'c', '1', 0x01, 0xB1),
+		video(40, 0x96, 0x03, 'v', 'v', 'c', '1', 0x00, 0xA1),
+	)
+
+	conn := newReadConn(data)
+	conn.isserver = true
+	conn.stage = stageHandshakeDone
+
+	streams, err := conn.Streams()
+	require.NoError(t, err)
+	require.Len(t, streams, 2)
+	require.Equal(t, av.VVC, streams[0].Type())
+	require.Equal(t, []byte{0x01}, streams[0].(vvcparser.CodecData).VVCDecoderConfRecordBytes())
+	require.Equal(t, av.AAC, streams[1].Type())
+	require.Equal(t, 44100, streams[1].(av.AudioCodecData).SampleRate())
+
+	for i, expected := range []av.Packet{
+		{Idx: 0, Data: []byte{0xA0}, IsKeyFrame: true},
+		{Idx: 1, Data: []byte{0xAA}, IsKeyFrame: true},
+		{Idx: 0, Data: []byte{0xA1}, IsKeyFrame: true, Time: 40},
 	} {
 		pkt, err := conn.ReadPacket()
 		require.NoError(t, err, "packet %d", i)

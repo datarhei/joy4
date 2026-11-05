@@ -91,12 +91,20 @@ var (
 	FOURCC_MP3  = [4]byte{'.', 'm', 'p', '3'}
 )
 
+// The multitrack types (E-RTMP v2, AvMultitrackType).
+const (
+	MULTITRACK_ONE_TRACK               = 0
+	MULTITRACK_MANY_TRACKS             = 1
+	MULTITRACK_MANY_TRACKS_MANY_CODECS = 2
+)
+
 // The types of ModEx data (E-RTMP v2, VideoPacketModExType and AudioPacketModExType).
 const (
 	MODEX_TIMESTAMP_OFFSET_NANO = 0
 )
 
 var (
+	FOURCC_AVC  = [4]byte{'a', 'v', 'c', '1'}
 	FOURCC_AV1  = [4]byte{'a', 'v', '0', '1'}
 	FOURCC_VP9  = [4]byte{'v', 'p', '0', '9'}
 	FOURCC_HEVC = [4]byte{'h', 'v', 'c', '1'}
@@ -222,6 +230,16 @@ type Tag struct {
 	TimestampNanoOffset uint32
 
 	/*
+		A video or audio packet of the type Multitrack (E-RTMP v2). PacketType is the packet type of the
+		tracks, TrackID the id of the track. A message with several tracks (MultitrackType ManyTracks or
+		ManyTracksManyCodecs) has all of them in Data after ParseHeader, SplitTracks returns a tag for each.
+		FillHeader writes a OneTrack header for the track.
+	*/
+	IsMultitrack   bool
+	MultitrackType uint8
+	TrackID        uint8
+
+	/*
 		0: AVC sequence header
 		1: AVC NALU
 		2: AVC end of sequence (lower level NALU sequence ender is not required or supported)
@@ -310,18 +328,9 @@ func (t *Tag) audioParseHeader(b []byte) (n int, err error) {
 			return
 		}
 
-		if t.PacketType == AUDIO_PKTTYPE_MULTITRACK {
-			// not supported yet, the data starts with the multitrack type
-			return
+		if n, err = t.parseMultitrack(b, n, AUDIO_PKTTYPE_MULTITRACK); err != nil {
+			err = fmt.Errorf("audiodata: %w", err)
 		}
-
-		if len(b) < n+4 {
-			err = fmt.Errorf("audiodata: parse invalid: not enough bytes for the fourCC value")
-			return
-		}
-		copy(t.FourCC[:], b[n:n+4])
-		n += 4
-
 		return
 	}
 
@@ -344,10 +353,21 @@ func (t *Tag) audioParseHeader(b []byte) (n int, err error) {
 
 func (t Tag) audioFillHeader(b []byte) (n int) {
 	if t.IsExHeader {
-		b[n] = SOUND_EXHEADER<<4 | t.PacketType&0x0f
-		n++
+		if t.IsMultitrack {
+			b[n] = SOUND_EXHEADER<<4 | AUDIO_PKTTYPE_MULTITRACK
+			n++
+			b[n] = MULTITRACK_ONE_TRACK<<4 | t.PacketType&0x0f
+			n++
+		} else {
+			b[n] = SOUND_EXHEADER<<4 | t.PacketType&0x0f
+			n++
+		}
 		copy(b[n:], t.FourCC[:])
 		n += 4
+		if t.IsMultitrack {
+			b[n] = t.TrackID
+			n++
+		}
 		return
 	}
 
@@ -402,6 +422,117 @@ func (t *Tag) parseModEx(b []byte, n int) (int, error) {
 		}
 	}
 
+	return n, nil
+}
+
+// parseMultitrack parses the multitrack header (E-RTMP v2) if the packet type is multitrackPacketType, the
+// FourCC and, with OneTrack, the track id. With several tracks in the message, it stops in front of the
+// first track.
+func (t *Tag) parseMultitrack(b []byte, n int, multitrackPacketType uint8) (int, error) {
+	if t.PacketType == multitrackPacketType {
+		if len(b) < n+1 {
+			return n, fmt.Errorf("parse invalid: not enough bytes for the multitrack type")
+		}
+		t.IsMultitrack = true
+		t.MultitrackType = b[n] >> 4
+		t.PacketType = b[n] & 0x0f
+		n++
+
+		if t.MultitrackType > MULTITRACK_MANY_TRACKS_MANY_CODECS {
+			return n, fmt.Errorf("parse invalid: unknown multitrack type %d", t.MultitrackType)
+		}
+		if t.PacketType == multitrackPacketType {
+			return n, fmt.Errorf("parse invalid: nested multitrack")
+		}
+		if t.MultitrackType == MULTITRACK_MANY_TRACKS_MANY_CODECS {
+			// each track has its FourCC
+			return n, nil
+		}
+	}
+
+	if len(b) < n+4 {
+		return n, fmt.Errorf("parse invalid: not enough bytes for the fourCC value")
+	}
+	copy(t.FourCC[:], b[n:n+4])
+	n += 4
+
+	if t.IsMultitrack {
+		if t.MultitrackType != MULTITRACK_ONE_TRACK {
+			// each track has its id and size
+			return n, nil
+		}
+		if len(b) < n+1 {
+			return n, fmt.Errorf("parse invalid: not enough bytes for the track id")
+		}
+		t.TrackID = b[n]
+		n++
+	}
+
+	return n, nil
+}
+
+// SplitTracks returns a tag for each track of a multitrack message (E-RTMP v2) with several tracks, as
+// parsed by ParseHeader with the tracks in Data. Any other tag is returned as it is.
+func SplitTracks(tag Tag) ([]Tag, error) {
+	if !tag.IsMultitrack || tag.MultitrackType == MULTITRACK_ONE_TRACK {
+		return []Tag{tag}, nil
+	}
+
+	tags := []Tag{}
+	data := tag.Data
+	for len(data) != 0 {
+		track := tag
+		n := 0
+		if tag.MultitrackType == MULTITRACK_MANY_TRACKS_MANY_CODECS {
+			if len(data) < n+4 {
+				return nil, fmt.Errorf("flvio: multitrack invalid: not enough bytes for the fourCC value")
+			}
+			copy(track.FourCC[:], data[n:n+4])
+			n += 4
+		}
+		if len(data) < n+4 {
+			return nil, fmt.Errorf("flvio: multitrack invalid: not enough bytes for the track id and size")
+		}
+		track.TrackID = data[n]
+		size := int(pio.U24BE(data[n+1:]))
+		n += 4
+		if len(data) < n+size {
+			return nil, fmt.Errorf("flvio: multitrack invalid: not enough bytes for the track")
+		}
+		body := data[n : n+size]
+		data = data[n+size:]
+
+		if track.Type == TAG_VIDEO {
+			m, err := track.videoParseCodecHeader(body, 0)
+			if err != nil {
+				return nil, fmt.Errorf("flvio: multitrack invalid: %w", err)
+			}
+			body = body[m:]
+		}
+		track.Data = body
+		tags = append(tags, track)
+	}
+
+	return tags, nil
+}
+
+// hasCompositionTime returns whether a video packet of the ExVideoTagHeader has a composition time offset
+// (E-RTMP v2: CodedFrames of AVC, HEVC and VVC).
+func (t Tag) hasCompositionTime() bool {
+	return t.PacketType == PKTTYPE_CODED_FRAMES && (t.FourCC == FOURCC_AVC || t.FourCC == FOURCC_HEVC || t.FourCC == FOURCC_VVC)
+}
+
+// videoParseCodecHeader parses the fields of the ExVideoTagHeader after the FourCC (and the track id) that
+// depend on the codec, i.e. the composition time offset.
+func (t *Tag) videoParseCodecHeader(b []byte, n int) (int, error) {
+	t.CompositionTime = 0
+	if t.hasCompositionTime() {
+		if len(b) < n+3 {
+			return n, fmt.Errorf("parse invalid: not enough bytes for the composition time")
+		}
+		t.CompositionTime = int64(pio.I24BE(b[n:]))
+		n += 3
+	}
 	return n, nil
 }
 
@@ -466,30 +597,20 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 			n += 3
 		}
 	} else {
-		if len(b) < n+4 {
-			err = fmt.Errorf("videodata: parse invalid: not enough bytes for the fourCC value")
+		if n, err = t.parseMultitrack(b, n, PKTTYPE_MULTITRACK); err != nil {
+			err = fmt.Errorf("videodata: %w", err)
 			return
 		}
 
-		t.FourCC[0] = b[n]
-		t.FourCC[1] = b[n+1]
-		t.FourCC[2] = b[n+2]
-		t.FourCC[3] = b[n+3]
+		if t.IsMultitrack && t.MultitrackType != MULTITRACK_ONE_TRACK {
+			// the tracks are in the data (SplitTracks)
+			return
+		}
 
-		n += 4
-
-		t.CompositionTime = 0
-
-		// HEVC and VVC have a composition time offset with CodedFrames (E-RTMP v2)
-		if t.FourCC == FOURCC_HEVC || t.FourCC == FOURCC_VVC {
-			if t.PacketType == PKTTYPE_CODED_FRAMES {
-				if len(b) < n+3 {
-					err = fmt.Errorf("videodata: parse invalid: not enough bytes for the composition time")
-					return
-				}
-				t.CompositionTime = int64(pio.I24BE(b[n:]))
-				n += 3
-			}
+		// AVC, HEVC and VVC have a composition time offset with CodedFrames (E-RTMP v2)
+		if n, err = t.videoParseCodecHeader(b, n); err != nil {
+			err = fmt.Errorf("videodata: %w", err)
+			return
 		}
 	}
 
@@ -562,25 +683,32 @@ func compositionTimeSI24(cts int64) int32 {
 
 func (t Tag) videoFillHeader(b []byte) (n int) {
 	if t.IsExHeader {
-		flags := t.FrameType<<4 | t.PacketType | 0b10000000
-		b[n] = flags
-		n++
 		if t.PacketType != PKTTYPE_METADATA && t.FrameType == FRAME_COMMAND {
 			// the command is the first byte of the data
+			b[n] = t.FrameType<<4 | t.PacketType | 0b10000000
+			n++
 			return
 		}
-		b[n] = t.FourCC[0]
-		b[n+1] = t.FourCC[1]
-		b[n+2] = t.FourCC[2]
-		b[n+3] = t.FourCC[3]
+		if t.IsMultitrack {
+			b[n] = t.FrameType<<4 | PKTTYPE_MULTITRACK | 0b10000000
+			n++
+			b[n] = MULTITRACK_ONE_TRACK<<4 | t.PacketType&0x0f
+			n++
+		} else {
+			b[n] = t.FrameType<<4 | t.PacketType | 0b10000000
+			n++
+		}
+		copy(b[n:], t.FourCC[:])
 		n += 4
+		if t.IsMultitrack {
+			b[n] = t.TrackID
+			n++
+		}
 
-		// HEVC and VVC have a composition time offset with CodedFrames (E-RTMP v2)
-		if t.FourCC == FOURCC_HEVC || t.FourCC == FOURCC_VVC {
-			if t.PacketType == PKTTYPE_CODED_FRAMES {
-				pio.PutI24BE(b[n:], compositionTimeSI24(t.CompositionTime))
-				n += 3
-			}
+		// AVC, HEVC and VVC have a composition time offset with CodedFrames (E-RTMP v2)
+		if t.hasCompositionTime() {
+			pio.PutI24BE(b[n:], compositionTimeSI24(t.CompositionTime))
+			n += 3
 		}
 	} else {
 		flags := t.FrameType<<4 | t.CodecID

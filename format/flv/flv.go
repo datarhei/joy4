@@ -162,13 +162,24 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 		return
 	}
 
+	if tag.TrackID != 0 {
+		// the other tracks of a multitrack stream (E-RTMP v2) are not supported yet
+		return
+	}
+
 	switch tag.Type {
 	case flvio.TAG_VIDEO:
 		if isVideoMetadata(tag) {
 			// it applies to the packets after it
 			prober.CacheTag(tag, timestamp)
 		} else if tag.IsExHeader {
-			if tag.FourCC == flvio.FOURCC_HEVC {
+			if tag.FourCC == flvio.FOURCC_AVC {
+				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
+					err = prober.pushH264Config(tag, timestamp)
+				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
+					prober.CacheTag(tag, timestamp)
+				}
+			} else if tag.FourCC == flvio.FOURCC_HEVC {
 				if tag.PacketType == flvio.PKTTYPE_SEQUENCE_START {
 					if !prober.GotVideo {
 						var stream hevcparser.CodecData
@@ -250,22 +261,7 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 		} else if tag.CodecID == flvio.VIDEO_H264 {
 			switch tag.AVCPacketType {
 			case flvio.AVC_SEQHDR:
-				if !prober.GotVideo {
-					var stream h264parser.CodecData
-					//fmt.Printf("got H264 sequence start:\n%s\n", hex.Dump(tag.Data))
-					if stream, err = h264parser.NewCodecDataFromAVCDecoderConfRecord(tag.Data); err != nil {
-						err = fmt.Errorf("flv: h264 seqhdr invalid: %s", err.Error())
-						return
-					}
-					prober.VideoStreamIdx = len(prober.Streams)
-					prober.Streams = append(prober.Streams, stream)
-					prober.GotVideo = true
-					prober.videoRecord = tag.Data
-					prober.videoCodecData = stream
-				} else {
-					// a new config in the middle of the stream
-					prober.CacheTag(tag, timestamp)
-				}
+				err = prober.pushH264Config(tag, timestamp)
 
 			case flvio.AVC_NALU:
 				prober.CacheTag(tag, timestamp)
@@ -318,6 +314,26 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 	}
 
 	return
+}
+
+// pushH264Config creates the video stream from the config record of the first H.264 sequence header, a
+// later one is cached for the frames after it.
+func (prober *Prober) pushH264Config(tag flvio.Tag, timestamp int64) error {
+	if prober.GotVideo {
+		// a new config in the middle of the stream
+		prober.CacheTag(tag, timestamp)
+		return nil
+	}
+	stream, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(tag.Data)
+	if err != nil {
+		return fmt.Errorf("flv: h264 seqhdr invalid: %s", err.Error())
+	}
+	prober.VideoStreamIdx = len(prober.Streams)
+	prober.Streams = append(prober.Streams, stream)
+	prober.GotVideo = true
+	prober.videoRecord = tag.Data
+	prober.videoCodecData = stream
+	return nil
 }
 
 // pushAACConfig creates the audio stream from the AudioSpecificConfig of the first AAC sequence header.
@@ -473,6 +489,8 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 			return 0
 		}
 		switch tag.FourCC {
+		case flvio.FOURCC_AVC:
+			return av.H264
 		case flvio.FOURCC_HEVC:
 			return av.HEVC
 		case flvio.FOURCC_VP9:
@@ -581,6 +599,11 @@ func (prober *Prober) updateVideoConfig(tag flvio.Tag) {
 // color info (E-RTMP) updates ColorInfo and returns false. A video sequence header returns false, a new
 // config is put in-band into the following key frames (see updateVideoConfig).
 func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet, ok bool) {
+	if tag.TrackID != 0 {
+		// the other tracks of a multitrack stream (E-RTMP v2) are not supported yet
+		return
+	}
+
 	if isVideoMetadata(tag) {
 		if colorInfo, found := flvio.ParseColorInfo(tag.Data); found {
 			prober.ColorInfo = colorInfo
@@ -1068,6 +1091,25 @@ type Demuxer struct {
 	bufr   *bufio.Reader
 	b      []byte
 	stage  int
+
+	// the tags of the last multitrack tag (E-RTMP v2) that haven't been returned by readTag yet
+	tags      []flvio.Tag
+	timestamp int64
+}
+
+// readTag returns the next tag, or the next track of a multitrack tag with several tracks.
+func (demuxer *Demuxer) readTag() (tag flvio.Tag, timestamp int64, err error) {
+	for len(demuxer.tags) == 0 {
+		if tag, demuxer.timestamp, err = flvio.ReadTag(demuxer.bufr, demuxer.b); err != nil {
+			return
+		}
+		if demuxer.tags, err = flvio.SplitTracks(tag); err != nil {
+			return
+		}
+	}
+	tag = demuxer.tags[0]
+	demuxer.tags = demuxer.tags[1:]
+	return tag, demuxer.timestamp, nil
 }
 
 func NewDemuxer(r io.Reader) *Demuxer {
@@ -1105,7 +1147,7 @@ func (demuxer *Demuxer) prepare() (err error) {
 			for !demuxer.prober.Probed() {
 				var tag flvio.Tag
 				var timestamp int64
-				if tag, timestamp, err = flvio.ReadTag(demuxer.bufr, demuxer.b); err != nil {
+				if tag, timestamp, err = demuxer.readTag(); err != nil {
 					return
 				}
 				if err = demuxer.prober.PushTag(tag, timestamp); err != nil {
@@ -1145,7 +1187,7 @@ func (demuxer *Demuxer) ReadPacket() (pkt av.Packet, err error) {
 	for {
 		var tag flvio.Tag
 		var timestamp int64
-		if tag, timestamp, err = flvio.ReadTag(demuxer.bufr, demuxer.b); err != nil {
+		if tag, timestamp, err = demuxer.readTag(); err != nil {
 			return
 		}
 
