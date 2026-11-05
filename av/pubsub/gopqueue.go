@@ -51,9 +51,11 @@ func (q *Queue) WriteHeader(streams []av.CodecData) error {
 	q.lock.Lock()
 
 	q.streams = streams
+	// the GOPs are those of the first video stream, e.g. the default track of a multitrack stream (E-RTMP v2)
 	for i, stream := range streams {
 		if stream.Type().IsVideo() {
 			q.videoidx = i
+			break
 		}
 	}
 	q.cond.Broadcast()

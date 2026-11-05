@@ -26,6 +26,7 @@ import (
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/codec/aacparser"
+	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv"
 	"github.com/datarhei/joy4/format/flv/flvio"
@@ -2708,6 +2709,8 @@ func TestServeOne(t *testing.T) {
 			stream, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
 			require.NoError(t, err)
 			require.NoError(t, conn.WriteHeader([]av.CodecData{stream}))
+			// probing ends at the first frame
+			require.NoError(t, conn.WritePacket(av.Packet{Data: []byte{0xAA}}))
 			client = <-clients
 			require.NotNil(t, client)
 			served <- conn
@@ -3179,7 +3182,7 @@ func TestReadExAudio(t *testing.T) {
 }
 
 func TestReadMultitrack(t *testing.T) {
-	// VVC and AAC with two tracks each, track 0 is read
+	// VVC and AAC with two tracks each, every track is a stream, sorted by the track id
 	video := func(timestamp uint32, payload ...byte) []byte {
 		return chunkMessage(6, timestamp, msgtypeidVideoMsg, 1, payload, 128)
 	}
@@ -3208,19 +3211,90 @@ func TestReadMultitrack(t *testing.T) {
 
 	streams, err := conn.Streams()
 	require.NoError(t, err)
-	require.Len(t, streams, 2)
+	require.Len(t, streams, 4)
 	require.Equal(t, av.VVC, streams[0].Type())
 	require.Equal(t, []byte{0x01}, streams[0].(vvcparser.CodecData).VVCDecoderConfRecordBytes())
-	require.Equal(t, av.AAC, streams[1].Type())
-	require.Equal(t, 44100, streams[1].(av.AudioCodecData).SampleRate())
+	require.Equal(t, av.VVC, streams[1].Type())
+	require.Equal(t, []byte{0x02}, streams[1].(vvcparser.CodecData).VVCDecoderConfRecordBytes())
+	require.Equal(t, av.AAC, streams[2].Type())
+	require.Equal(t, 44100, streams[2].(av.AudioCodecData).SampleRate())
+	require.Equal(t, av.AAC, streams[3].Type())
+	require.Equal(t, 48000, streams[3].(av.AudioCodecData).SampleRate())
 
 	for i, expected := range []av.Packet{
+		{Idx: 1, Data: []byte{0xB0}, IsKeyFrame: true},
 		{Idx: 0, Data: []byte{0xA0}, IsKeyFrame: true},
-		{Idx: 1, Data: []byte{0xAA}, IsKeyFrame: true},
+		{Idx: 2, Data: []byte{0xAA}, IsKeyFrame: true},
+		{Idx: 3, Data: []byte{0xBB}, IsKeyFrame: true},
+		{Idx: 1, Data: []byte{0xB1}, IsKeyFrame: true, Time: 40},
 		{Idx: 0, Data: []byte{0xA1}, IsKeyFrame: true, Time: 40},
 	} {
 		pkt, err := conn.ReadPacket()
 		require.NoError(t, err, "packet %d", i)
 		require.Equal(t, expected, pkt, "packet %d", i)
 	}
+}
+
+func TestPublishTracks(t *testing.T) {
+	// two video and two audio tracks from the client to the server
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(testAVCRecord(t))
+	require.NoError(t, err)
+	vvc, err := vvcparser.NewCodecDataFromVVCDecoderConfRecord([]byte{0x01, 0x02})
+	require.NoError(t, err)
+	aac44, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	aac48, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x11, 0x88})
+	require.NoError(t, err)
+	streams := []av.CodecData{h264, vvc, aac44, aac48}
+
+	packets := []av.Packet{
+		{Idx: 0, IsKeyFrame: true, Data: []byte{0xA0}, CompositionTime: 40},
+		{Idx: 1, IsKeyFrame: true, Data: []byte{0xB0}},
+		{Idx: 2, IsKeyFrame: true, Data: []byte{0xAA}},
+		{Idx: 3, IsKeyFrame: true, Data: []byte{0xBB}},
+		{Idx: 1, Data: []byte{0xB1}, Time: 40},
+		{Idx: 0, Data: []byte{0xA1}, Time: 40},
+	}
+
+	url, result := publishServer(t, func(s *Conn) error {
+		got, err := s.Streams()
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(streams, got) {
+			return fmt.Errorf("streams: %v", got)
+		}
+		metadata := s.GetMetaData()
+		if _, ok := metadata["videoTrackIdInfoMap"].(flvio.AMFMap)["1"]; !ok {
+			return fmt.Errorf("metadata: %v", metadata)
+		}
+		for i, expected := range packets {
+			pkt, err := s.ReadPacket()
+			if err != nil {
+				return err
+			}
+			if !reflect.DeepEqual(expected, pkt) {
+				return fmt.Errorf("packet %d: %+v", i, pkt)
+			}
+		}
+		return nil
+	})
+
+	conn, err := Dial(url, DialOptions{})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	require.NoError(t, conn.WriteHeader(streams))
+	for _, pkt := range packets {
+		require.NoError(t, conn.WritePacket(pkt))
+	}
+	require.NoError(t, conn.WriteTrailer())
+
+	require.NoError(t, <-result)
+}
+
+func testAVCRecord(t *testing.T) []byte {
+	record, err := hex.DecodeString("01f4000dffe1001867f4000d91968141fb011000000300100000030320f142aa01000568ce0f1920fff8f800")
+	require.NoError(t, err)
+	return record
 }

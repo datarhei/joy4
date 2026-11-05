@@ -437,6 +437,9 @@ type Conn struct {
 
 	metadata flvio.AMFMap
 
+	// the track ids (E-RTMP v2) of the streams that are written
+	trackIDs []uint8
+
 	// the color info to write before the next video packet
 	colorInfo        flvio.AMFMap
 	colorInfoPending bool
@@ -1622,13 +1625,16 @@ func (conn *Conn) WritePacket(pkt av.Packet) (err error) {
 	}
 
 	stream := conn.streams[pkt.Idx]
+	trackID := conn.trackIDs[pkt.Idx]
 	tag, timestamp := flv.PacketToTag(pkt, stream)
+	tag = flv.TrackTag(tag, trackID)
 
 	if Debug {
 		fmt.Println("rtmp: WritePacket", pkt.Idx, pkt.Time, pkt.CompositionTime)
 	}
 
-	if conn.colorInfoPending && stream.Type().IsVideo() {
+	// the color info is about the default video track
+	if conn.colorInfoPending && stream.Type().IsVideo() && trackID == 0 {
 		conn.colorInfoPending = false
 		if colorInfoTag, ok := flv.ColorInfoToTag(conn.colorInfo, stream); ok {
 			if err = conn.writeAVTag(colorInfoTag, timestamp); err != nil {
@@ -1679,6 +1685,11 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 
 	var metadata flvio.AMFMap
 
+	var trackIDs []uint8
+	if trackIDs, err = flv.TrackIDs(streams); err != nil {
+		return
+	}
+
 	if metadata, err = flv.NewMetadataByStreams(streams); err != nil {
 		return
 	}
@@ -1700,20 +1711,21 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 
 	// > Videodata(decoder config)
 	// > Audiodata(decoder config)
-	for _, stream := range streams {
+	for i, stream := range streams {
 		var ok bool
 		var tag flvio.Tag
 		if tag, ok, err = flv.CodecDataToTag(stream); err != nil {
 			return
 		}
 		if ok {
-			if err = conn.writeAVTag(tag, 0); err != nil {
+			if err = conn.writeAVTag(flv.TrackTag(tag, trackIDs[i]), 0); err != nil {
 				return
 			}
 		}
 	}
 
 	conn.streams = streams
+	conn.trackIDs = trackIDs
 	conn.stage++
 
 	// the peer is not required to send anything while a client publishes or a server sends to a player

@@ -33,6 +33,7 @@ func TestProberVVC(t *testing.T) {
 	}, 0)
 	require.NoError(t, err)
 
+	pushCodedFrame(t, prober)
 	require.True(t, prober.Probed())
 	require.Len(t, prober.Streams, 1)
 	require.Equal(t, av.VVC, prober.Streams[0].Type())
@@ -117,6 +118,12 @@ func TestMuxDemuxVVCCompositionTime(t *testing.T) {
 	}
 }
 
+// pushCodedFrame pushes a frame of an unsupported codec (MP3). Without a TrackIdInfoMap, probing ends at
+// the first coded frame after the announced streams.
+func pushCodedFrame(t *testing.T, prober *Prober) {
+	require.NoError(t, prober.PushTag(flvio.Tag{Type: flvio.TAG_AUDIO, SoundFormat: flvio.SOUND_MP3, Data: []byte{0xFF}}, 0))
+}
+
 func aacTag(packetType uint8, data []byte) flvio.Tag {
 	return flvio.Tag{Type: flvio.TAG_AUDIO, SoundFormat: flvio.SOUND_AAC, SoundRate: flvio.SOUND_44Khz, SoundSize: flvio.SOUND_16BIT, SoundType: flvio.SOUND_STEREO, AACPacketType: packetType, Data: data}
 }
@@ -131,6 +138,7 @@ func TestProberNoVideoStream(t *testing.T) {
 	prober.HasAudio = true
 
 	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_SEQHDR, []byte{0x12, 0x10}), 0))
+	pushCodedFrame(t, prober)
 	require.True(t, prober.Probed())
 	require.Len(t, prober.Streams, 1)
 
@@ -150,6 +158,7 @@ func TestProberCodecMismatch(t *testing.T) {
 	prober.HasVideo = true
 
 	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x01}), 0))
+	pushCodedFrame(t, prober)
 	require.True(t, prober.Probed())
 
 	_, ok := prober.TagToPacket(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_CODED_FRAMESX, []byte{0xBB}), 40)
@@ -597,6 +606,7 @@ func TestProberMidStreamSequenceHeaderH264(t *testing.T) {
 	prober := NewProber(0)
 	prober.HasVideo = true
 	require.NoError(t, prober.PushTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordA), 0))
+	pushCodedFrame(t, prober)
 	require.True(t, prober.Probed())
 	require.Len(t, prober.Streams, 1)
 
@@ -671,6 +681,7 @@ func TestProberMidStreamSequenceHeaderHEVC(t *testing.T) {
 	prober := NewProber(0)
 	prober.HasVideo = true
 	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_HEVC, flvio.PKTTYPE_SEQUENCE_START, recordA), 0))
+	pushCodedFrame(t, prober)
 	require.True(t, prober.Probed())
 
 	_, ok := prober.TagToPacket(exVideoTag(flvio.FOURCC_HEVC, flvio.PKTTYPE_SEQUENCE_START, recordB), 0)
@@ -698,6 +709,7 @@ func TestProberMidStreamSequenceHeaderIgnored(t *testing.T) {
 		prober := NewProber(0)
 		prober.HasVideo = true
 		require.NoError(t, prober.PushTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordA), 0), name)
+		pushCodedFrame(t, prober)
 		require.True(t, prober.Probed(), name)
 
 		_, ok := prober.TagToPacket(tag, 0)
@@ -806,18 +818,27 @@ func TestDemuxerMultitrack(t *testing.T) {
 		file = append(file, tag...)
 	}
 
+	// every track is a stream, probing ends at the first coded frame
 	demuxer := NewDemuxer(bytes.NewReader(file))
 	streams, err := demuxer.Streams()
 	require.NoError(t, err)
-	require.Len(t, streams, 2)
+	require.Len(t, streams, 4)
 	require.Equal(t, av.H264, streams[0].Type())
 	require.Equal(t, 320, streams[0].(av.VideoCodecData).Width())
-	require.Equal(t, av.AAC, streams[1].Type())
+	require.Equal(t, av.H264, streams[1].Type())
+	require.Equal(t, 640, streams[1].(av.VideoCodecData).Width())
+	require.Equal(t, av.AAC, streams[2].Type())
+	require.Equal(t, 44100, streams[2].(av.AudioCodecData).SampleRate())
+	require.Equal(t, av.AAC, streams[3].Type())
+	require.Equal(t, 48000, streams[3].(av.AudioCodecData).SampleRate())
 
 	for i, expected := range []av.Packet{
 		{Idx: 0, Data: []byte{0xA0}, IsKeyFrame: true},
-		{Idx: 1, Data: []byte{0xAA}, IsKeyFrame: true},
+		{Idx: 1, Data: []byte{0xB0}, IsKeyFrame: true},
+		{Idx: 2, Data: []byte{0xAA}, IsKeyFrame: true},
+		{Idx: 3, Data: []byte{0xBB}, IsKeyFrame: true},
 		{Idx: 0, Data: []byte{0xA1}, IsKeyFrame: true, Time: 40, CompositionTime: 40},
+		{Idx: 1, Data: []byte{0xB1}, IsKeyFrame: true, Time: 40, CompositionTime: 40},
 		{Idx: 0, Data: []byte{0xA2}, IsKeyFrame: true, Time: 80, CompositionTime: 20},
 	} {
 		pkt, err := demuxer.ReadPacket()
@@ -826,4 +847,241 @@ func TestDemuxerMultitrack(t *testing.T) {
 	}
 	_, err = demuxer.ReadPacket()
 	require.Error(t, err)
+}
+
+// trackTag returns the tag as a OneTrack multitrack tag.
+func trackTag(tag flvio.Tag, trackID uint8) flvio.Tag {
+	return TrackTag(tag, trackID)
+}
+
+func TestProberTrackIdInfoMap(t *testing.T) {
+	recordA := decodeHex(t, avcRecord320x240)
+	recordB := decodeHex(t, avcRecord640x360)
+
+	prober := NewProber(0)
+	prober.PushMetadata(flvio.AMFMap{
+		"videocodecid": 7.0,
+		"audiocodecid": 10.0,
+		"videoTrackIdInfoMap": flvio.AMFMap{
+			// delta-style: the codec of the default track
+			"1": flvio.AMFMap{"width": 640.0},
+			// unsupported, not waited for
+			"2": flvio.AMFMap{"videocodecid": flvio.FourCCToFloat([4]byte{'v', 'p', '0', '8'})},
+		},
+		"audioTrackIdInfoMap": flvio.AMFMap{
+			"1": flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_AAC)},
+		},
+	})
+
+	require.NoError(t, prober.PushTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordA), 0))
+	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_SEQHDR, []byte{0x12, 0x10}), 0))
+	require.NoError(t, prober.PushTag(trackTag(exAudioTag(flvio.FOURCC_AAC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x11, 0x88}), 1), 0))
+	require.False(t, prober.Probed())
+	require.NoError(t, prober.PushTag(trackTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordB), 1), 0))
+	// all announced tracks are there, no coded frame needed
+	require.True(t, prober.Probed())
+
+	require.Len(t, prober.Streams, 4)
+	require.Equal(t, 320, prober.Streams[0].(av.VideoCodecData).Width())
+	require.Equal(t, 44100, prober.Streams[1].(av.AudioCodecData).SampleRate())
+	require.Equal(t, 48000, prober.Streams[2].(av.AudioCodecData).SampleRate())
+	require.Equal(t, 640, prober.Streams[3].(av.VideoCodecData).Width())
+	require.Equal(t, 0, prober.VideoStreamIdx)
+	require.Equal(t, 1, prober.AudioStreamIdx)
+
+	keyFrame := []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x88}
+	for _, tc := range []struct {
+		tag flvio.Tag
+		idx int8
+	}{
+		{avcTag(flvio.AVC_NALU, flvio.FRAME_KEY, keyFrame), 0},
+		{trackTag(avcTag(flvio.AVC_NALU, flvio.FRAME_KEY, keyFrame), 1), 3},
+		{aacTag(flvio.AAC_RAW, []byte{0xAA}), 1},
+		{trackTag(exAudioTag(flvio.FOURCC_AAC, flvio.PKTTYPE_CODED_FRAMES, []byte{0xBB}), 1), 2},
+	} {
+		pkt, ok := prober.TagToPacket(tc.tag, 0)
+		require.True(t, ok)
+		require.Equal(t, tc.idx, pkt.Idx)
+	}
+
+	// a track that appears after probing is dropped
+	_, ok := prober.TagToPacket(trackTag(avcTag(flvio.AVC_NALU, flvio.FRAME_KEY, keyFrame), 3), 0)
+	require.False(t, ok)
+}
+
+func TestProberTracksSorted(t *testing.T) {
+	// without a TrackIdInfoMap, probing ends at the first coded frame, the tracks are sorted by their id
+	prober := NewProber(0)
+	prober.PushMetadata(flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_VVC)})
+
+	require.NoError(t, prober.PushTag(trackTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x02}), 2), 0))
+	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x00}), 0))
+	require.False(t, prober.Probed())
+	require.NoError(t, prober.PushTag(trackTag(exVideoTag(flvio.FOURCC_HEVC, flvio.PKTTYPE_SEQUENCE_START, hevcRecord(t, hevcParamSets320x240)), 1), 0))
+	require.False(t, prober.Probed())
+	require.NoError(t, prober.PushTag(trackTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_CODED_FRAMESX, []byte{0xC0}), 2), 0))
+	require.True(t, prober.Probed())
+
+	require.Len(t, prober.Streams, 3)
+	require.Equal(t, []byte{0x00}, prober.Streams[0].(vvcparser.CodecData).VVCDecoderConfRecordBytes())
+	require.Equal(t, av.HEVC, prober.Streams[1].Type())
+	require.Equal(t, []byte{0x02}, prober.Streams[2].(vvcparser.CodecData).VVCDecoderConfRecordBytes())
+	require.Equal(t, 0, prober.VideoStreamIdx)
+
+	require.False(t, prober.Empty())
+	pkt := prober.PopPacket()
+	require.Equal(t, int8(2), pkt.Idx)
+	require.Equal(t, []byte{0xC0}, pkt.Data)
+	require.True(t, prober.Empty())
+}
+
+func TestProberTracksMidStreamSequenceHeader(t *testing.T) {
+	// the in-band parameter sets of a new config are per track
+	recordA := decodeHex(t, avcRecord320x240)
+	recordB := decodeHex(t, avcRecord640x360)
+	codecDataB, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(recordB)
+	require.NoError(t, err)
+	keyFrame := []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x88}
+
+	prober := NewProber(0)
+	prober.PushMetadata(flvio.AMFMap{"videocodecid": 7.0, "videoTrackIdInfoMap": flvio.AMFMap{"1": flvio.AMFMap{}}})
+	require.NoError(t, prober.PushTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordA), 0))
+	require.NoError(t, prober.PushTag(trackTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordA), 1), 0))
+	require.True(t, prober.Probed())
+
+	_, ok := prober.TagToPacket(trackTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordB), 1), 0)
+	require.False(t, ok)
+
+	pkt, ok := prober.TagToPacket(avcTag(flvio.AVC_NALU, flvio.FRAME_KEY, keyFrame), 0)
+	require.True(t, ok)
+	require.Equal(t, keyFrame, pkt.Data)
+
+	pkt, ok = prober.TagToPacket(trackTag(avcTag(flvio.AVC_NALU, flvio.FRAME_KEY, keyFrame), 1), 0)
+	require.True(t, ok)
+	require.Equal(t, int8(1), pkt.Idx)
+	require.Equal(t, withParamSets(keyFrame, codecDataB.SPS(), codecDataB.PPS()), pkt.Data)
+}
+
+func TestProberTracksColorInfo(t *testing.T) {
+	// only the color info of the default video track is used
+	info0 := flvio.AMFMap{"colorConfig": flvio.AMFMap{"colorPrimaries": 9.0}}
+	info1 := flvio.AMFMap{"colorConfig": flvio.AMFMap{"colorPrimaries": 1.0}}
+
+	prober := NewProber(0)
+	prober.PushMetadata(flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_VVC), "videoTrackIdInfoMap": flvio.AMFMap{"1": flvio.AMFMap{}}})
+	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x00}), 0))
+	require.NoError(t, prober.PushTag(trackTag(colorInfoTag(info1), 1), 0))
+	require.NoError(t, prober.PushTag(trackTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x01}), 1), 0))
+	require.True(t, prober.Probed())
+	require.True(t, prober.Empty())
+	require.Nil(t, prober.ColorInfo)
+
+	_, ok := prober.TagToPacket(colorInfoTag(info0), 0)
+	require.False(t, ok)
+	require.Equal(t, info0, prober.ColorInfo)
+	_, ok = prober.TagToPacket(trackTag(colorInfoTag(info1), 1), 0)
+	require.False(t, ok)
+	require.Equal(t, info0, prober.ColorInfo)
+}
+
+func TestTrackIDs(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+	aac, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	speex := codec.NewSpeexCodecData(16000, av.CH_MONO)
+
+	ids, err := TrackIDs([]av.CodecData{h264, aac, h264, aac, h264})
+	require.NoError(t, err)
+	require.Equal(t, []uint8{0, 0, 1, 1, 2}, ids)
+
+	// Speex has no FourCC, it can only be the default track
+	ids, err = TrackIDs([]av.CodecData{speex, aac})
+	require.NoError(t, err)
+	require.Equal(t, []uint8{0, 1}, ids)
+	_, err = TrackIDs([]av.CodecData{aac, speex})
+	require.Error(t, err)
+}
+
+func TestMuxDemuxTracks(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+	hevc, err := hevcparser.NewCodecDataFromHEVCDecoderConfRecord(hevcRecord(t, hevcParamSets640x360))
+	require.NoError(t, err)
+	aac44, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	aac48, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x11, 0x88})
+	require.NoError(t, err)
+	streams := []av.CodecData{h264, aac44, hevc, aac48}
+
+	packets := []av.Packet{
+		{Idx: 0, IsKeyFrame: true, Data: []byte{0xA0}, CompositionTime: 40},
+		{Idx: 2, IsKeyFrame: true, Data: []byte{0xB0}, CompositionTime: 40},
+		{Idx: 1, IsKeyFrame: true, Data: []byte{0xAA}},
+		{Idx: 3, IsKeyFrame: true, Data: []byte{0xBB}},
+		{Idx: 0, Data: []byte{0xA1}, Time: 40},
+		{Idx: 2, Data: []byte{0xB1}, Time: 40},
+	}
+
+	buf := &bytes.Buffer{}
+	muxer := NewMuxer(buf)
+	require.NoError(t, muxer.WriteHeader(streams))
+	for _, pkt := range packets {
+		require.NoError(t, muxer.WritePacket(pkt))
+	}
+	require.NoError(t, muxer.WriteTrailer())
+
+	demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+	got, err := demuxer.Streams()
+	require.NoError(t, err)
+	require.Equal(t, streams, got)
+	for i, expected := range packets {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, expected, pkt, "packet %d", i)
+	}
+
+	// a stream that can't be a track
+	require.Error(t, NewMuxer(&bytes.Buffer{}).WriteHeader([]av.CodecData{aac44, codec.NewSpeexCodecData(16000, av.CH_MONO)}))
+}
+
+func TestMetadataTracks(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+	h264b, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord640x360))
+	require.NoError(t, err)
+	aac44, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	aac48, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x11, 0x88})
+	require.NoError(t, err)
+
+	metadata, err := NewMetadataByStreams([]av.CodecData{h264, aac44, h264b, aac48})
+	require.NoError(t, err)
+	require.Equal(t, flvio.AMFMap{
+		"videocodecid":    flvio.VIDEO_H264,
+		"width":           320,
+		"height":          240,
+		"displayWidth":    320,
+		"displayHeight":   240,
+		"audiocodecid":    flvio.SOUND_AAC,
+		"audiosamplerate": 44100,
+		"videoTrackIdInfoMap": flvio.AMFMap{
+			"1": flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_AVC), "width": 640, "height": 360},
+		},
+		"audioTrackIdInfoMap": flvio.AMFMap{
+			"1": flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_AAC), "samplerate": 48000, "channels": 1},
+		},
+	}, metadata)
+
+	// the prober waits for the announced tracks (the AMF encoding turns the numbers into float64)
+	data := make([]byte, flvio.LenAMF0Val(metadata))
+	flvio.FillAMF0Val(data, metadata)
+	val, _, err := flvio.ParseAMF0Val(data)
+	require.NoError(t, err)
+	prober := NewProber(0)
+	prober.PushMetadata(val.(flvio.AMFMap))
+	require.True(t, prober.HasVideo)
+	require.True(t, prober.HasAudio)
+	require.Equal(t, map[uint8]bool{1: true}, prober.announcedVideoTracks)
+	require.Equal(t, map[uint8]bool{1: true}, prober.announcedAudioTracks)
 }

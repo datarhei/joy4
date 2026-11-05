@@ -41,11 +41,15 @@ func (self FilterDemuxer) ReadPacket() (pkt av.Packet, err error) {
 		if self.streams, err = self.Demuxer.Streams(); err != nil {
 			return
 		}
+		// the first video and audio stream, e.g. the default tracks of a multitrack stream (E-RTMP v2)
+		videoFound, audioFound := false, false
 		for i, stream := range self.streams {
-			if stream.Type().IsVideo() {
+			if stream.Type().IsVideo() && !videoFound {
 				self.videoidx = i
-			} else if stream.Type().IsAudio() {
+				videoFound = true
+			} else if stream.Type().IsAudio() && !audioFound {
 				self.audioidx = i
+				audioFound = true
 			}
 		}
 	}
