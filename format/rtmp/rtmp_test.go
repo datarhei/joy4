@@ -2887,6 +2887,7 @@ func TestConnectFourCC(t *testing.T) {
 		{"fourCcList", flvio.AMFMap{"fourCcList": flvio.AMFArray{"hvc1"}}, true},
 		{"videoFourCcInfoMap", flvio.AMFMap{"videoFourCcInfoMap": flvio.AMFMap{"*": 4.0}}, true},
 		{"audioFourCcInfoMap", flvio.AMFMap{"audioFourCcInfoMap": flvio.AMFMap{"mp4a": 4.0}}, true},
+		{"capsEx", flvio.AMFMap{"capsEx": 2.0}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			params := flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"}
@@ -2921,11 +2922,16 @@ func TestConnectFourCC(t *testing.T) {
 				require.Equal(t, fourCcList, properties["fourCcList"])
 				require.Equal(t, infoMap, properties["videoFourCcInfoMap"])
 				require.Equal(t, audioInfoMap, properties["audioFourCcInfoMap"])
+				require.Equal(t, 6.0, properties["capsEx"])
 			} else {
 				require.NotContains(t, properties, "fourCcList")
 				require.NotContains(t, properties, "videoFourCcInfoMap")
 				require.NotContains(t, properties, "audioFourCcInfoMap")
+				require.NotContains(t, properties, "capsEx")
 			}
+
+			// only a client with the multitrack flag gets multitrack
+			require.Equal(t, tc.name == "capsEx", conn.Multitrack())
 		})
 	}
 }
@@ -2954,6 +2960,7 @@ func TestClientConnectFourCC(t *testing.T) {
 	require.Equal(t, flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1", "mp4a"}, params["fourCcList"])
 	require.Equal(t, flvio.AMFMap{"av01": 4.0, "vp09": 4.0, "hvc1": 4.0, "vvc1": 4.0}, params["videoFourCcInfoMap"])
 	require.Equal(t, flvio.AMFMap{"mp4a": 4.0}, params["audioFourCcInfoMap"])
+	require.Equal(t, 6.0, params["capsEx"])
 }
 
 func TestWriteAVTagInvalidType(t *testing.T) {
@@ -3297,4 +3304,108 @@ func testAVCRecord(t *testing.T) []byte {
 	record, err := hex.DecodeString("01f4000dffe1001867f4000d91968141fb011000000300100000030320f142aa01000568ce0f1920fff8f800")
 	require.NoError(t, err)
 	return record
+}
+
+// writtenTags returns the audio and video tags and the onMetaData written by a client.
+func writtenTags(t *testing.T, data []byte) ([]flvio.Tag, flvio.AMFMap) {
+	rconn := newReadConn(data)
+	rconn.readMaxChunkSize = 65536
+	tags := []flvio.Tag{}
+	var metadata flvio.AMFMap
+	for {
+		if err := rconn.pollMsg(); err != nil {
+			require.ErrorIs(t, err, io.EOF)
+			return tags, metadata
+		}
+		if len(rconn.avtags) != 0 {
+			tags = append(tags, rconn.avtags...)
+		}
+		if rconn.msgtypeid == msgtypeidDataMsgAMF0 && len(rconn.datamsgvals) >= 2 {
+			if m, ok := rconn.datamsgvals[1].(flvio.AMFMap); ok {
+				metadata = m
+			}
+		}
+	}
+}
+
+func TestClientPublishMultitrack(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(testAVCRecord(t))
+	require.NoError(t, err)
+	vvc, err := vvcparser.NewCodecDataFromVVCDecoderConfRecord([]byte{0x01, 0x02})
+	require.NoError(t, err)
+	aac44, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	aac48, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x11, 0x88})
+	require.NoError(t, err)
+	streams := []av.CodecData{vvc, h264, aac44, aac48}
+
+	connectResultMultitrack := commandMessage("_result", 1.0, flvio.AMFMap{"fmsVer": "FMS/3,0,1,123", "capsEx": 2.0}, flvio.AMFMap{"level": "status", "code": "NetConnection.Connect.Success"})
+
+	for _, tc := range []struct {
+		name       string
+		result     []byte
+		multitrack *bool
+		tracks     int
+	}{
+		{"legacy server", connectResult, nil, 2},
+		{"multitrack server", connectResultMultitrack, nil, 4},
+		{"legacy server, multitrack on", connectResult, boolPtr(true), 4},
+		{"multitrack server, multitrack off", connectResultMultitrack, boolPtr(false), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := newScriptedClient(t, concat(
+				tc.result, createStreamResultPublish,
+				statusMessage("onStatus", 0, "status", "NetStream.Publish.Start", ""),
+			))
+			buf := &bytes.Buffer{}
+			conn.bufw = bufio.NewWriter(buf)
+			require.NoError(t, conn.prepare(stageCommandDone, prepareWriting))
+			// the read loop of WriteHeader blocks instead of failing at the end of the script
+			block := make(chan struct{})
+			defer close(block)
+			conn.bufr = bufio.NewReader(blockingReader{block})
+			if tc.multitrack != nil {
+				conn.SetMultitrack(*tc.multitrack)
+			}
+			require.Equal(t, tc.tracks == 4, conn.Multitrack())
+
+			require.NoError(t, conn.WriteHeader(streams))
+			for i := range streams {
+				require.NoError(t, conn.WritePacket(av.Packet{Idx: int8(i), IsKeyFrame: true, Data: []byte{byte(i)}}))
+			}
+			require.NoError(t, conn.bufw.Flush())
+
+			tags, metadata := writtenTags(t, buf.Bytes())
+			// a sequence start and a packet per track
+			require.Len(t, tags, 2*tc.tracks)
+			ids := map[[2]uint8]bool{}
+			for _, tag := range tags {
+				ids[[2]uint8{tag.Type, tag.TrackID}] = true
+			}
+			if tc.tracks == 2 {
+				require.Equal(t, map[[2]uint8]bool{{flvio.TAG_VIDEO, 0}: true, {flvio.TAG_AUDIO, 0}: true}, ids)
+				require.NotContains(t, metadata, "videoTrackIdInfoMap")
+				require.NotContains(t, metadata, "audioTrackIdInfoMap")
+				require.Equal(t, flvio.FourCCToFloat(flvio.FOURCC_VVC), metadata["videocodecid"])
+			} else {
+				require.Len(t, ids, 4)
+				require.Contains(t, metadata, "videoTrackIdInfoMap")
+				require.Contains(t, metadata, "audioTrackIdInfoMap")
+			}
+		})
+	}
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+// blockingReader blocks until the channel is closed, then it returns EOF.
+type blockingReader struct {
+	done chan struct{}
+}
+
+func (r blockingReader) Read(p []byte) (int, error) {
+	<-r.done
+	return 0, io.EOF
 }

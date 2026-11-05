@@ -437,8 +437,13 @@ type Conn struct {
 
 	metadata flvio.AMFMap
 
-	// the track ids (E-RTMP v2) of the streams that are written
-	trackIDs []uint8
+	// the track ids (E-RTMP v2) of the streams that are written, and whether a stream is written
+	trackIDs     []uint8
+	writeStreams []bool
+
+	// whether the peer announced multitrack (capsEx, E-RTMP v2), and whether it's overridden by SetMultitrack
+	peerMultitrack bool
+	multitrack     *bool
 
 	// the color info to write before the next video packet
 	colorInfo        flvio.AMFMap
@@ -921,6 +926,20 @@ var videoFourCCs = [][4]byte{flvio.FOURCC_AV1, flvio.FOURCC_VP9, flvio.FOURCC_HE
 // audioFourCCs are the FourCCs of the supported E-RTMP audio codecs (E-RTMP v2).
 var audioFourCCs = [][4]byte{flvio.FOURCC_AAC}
 
+// The flags of capsEx (E-RTMP v2, CapsExMask) that joy4 supports: multitrack and ModEx. The nano offset
+// of ModEx is parsed but not applied, reconnect is not supported.
+const (
+	capsExMultitrack = 0x02
+	capsExModEx      = 0x04
+	capsEx           = capsExMultitrack | capsExModEx
+)
+
+// hasCapsExMultitrack returns whether the capsEx property of the command object announces multitrack.
+func hasCapsExMultitrack(obj flvio.AMFMap) bool {
+	caps, ok := obj["capsEx"].(float64)
+	return ok && int64(caps)&capsExMultitrack != 0
+}
+
 // fourCcCanForward is the flag of the FourCcInfoMask (E-RTMP v2) for a codec that can be forwarded. joy4
 // neither decodes nor encodes.
 const fourCcCanForward = 0x04
@@ -998,6 +1017,7 @@ func (conn *Conn) readConnect() (err error) {
 
 	//fmt.Printf("readConnect: %+v\n", conn.commandobj)
 	conn.connectparams = conn.commandobj
+	conn.peerMultitrack = hasCapsExMultitrack(conn.connectparams)
 
 	var ok bool
 	var _app, _tcurl interface{}
@@ -1028,10 +1048,12 @@ func (conn *Conn) readConnect() (err error) {
 	_, hasFourCcList := conn.commandobj["fourCcList"]
 	_, hasVideoFourCcInfoMap := conn.commandobj["videoFourCcInfoMap"]
 	_, hasAudioFourCcInfoMap := conn.commandobj["audioFourCcInfoMap"]
-	if hasFourCcList || hasVideoFourCcInfoMap || hasAudioFourCcInfoMap {
+	_, hasCapsEx := conn.commandobj["capsEx"]
+	if hasFourCcList || hasVideoFourCcInfoMap || hasAudioFourCcInfoMap || hasCapsEx {
 		properties["fourCcList"] = fourCcList()
 		properties["videoFourCcInfoMap"] = videoFourCcInfoMap()
 		properties["audioFourCcInfoMap"] = audioFourCcInfoMap()
+		properties["capsEx"] = capsEx
 	}
 
 	// > _result("NetConnection.Connect.Success")
@@ -1314,6 +1336,7 @@ func (conn *Conn) writeConnect(path string) (err error) {
 			"fourCcList":         fourCcList(),
 			"videoFourCcInfoMap": videoFourCcInfoMap(),
 			"audioFourCcInfoMap": audioFourCcInfoMap(),
+			"capsEx":             capsEx,
 		},
 	); err != nil {
 		return
@@ -1334,6 +1357,7 @@ func (conn *Conn) writeConnect(path string) (err error) {
 		err = fmt.Errorf("command connect failed: %s", errmsg)
 		return
 	}
+	conn.peerMultitrack = hasCapsExMultitrack(conn.commandobj)
 	if Debug {
 		fmt.Printf("rtmp: < _result() of connect\n")
 	}
@@ -1624,6 +1648,11 @@ func (conn *Conn) WritePacket(pkt av.Packet) (err error) {
 		return
 	}
 
+	if !conn.writeStreams[pkt.Idx] {
+		// not a default track, and the peer doesn't support multitrack
+		return
+	}
+
 	stream := conn.streams[pkt.Idx]
 	trackID := conn.trackIDs[pkt.Idx]
 	tag, timestamp := flv.PacketToTag(pkt, stream)
@@ -1678,6 +1707,40 @@ func (conn *Conn) GetColorInfo() flvio.AMFMap {
 	return conn.prober.ColorInfo
 }
 
+// SetMultitrack sets whether all streams are written as tracks of a multitrack stream (E-RTMP v2), or only
+// the first video and the first audio stream. It must be called before WriteHeader. By default, all streams
+// are written if the peer announced multitrack in the connect command (a player) or its result (a server
+// the client publishes to), with capsEx. E.g. FFmpeg reads multitrack, but doesn't announce it.
+func (conn *Conn) SetMultitrack(enabled bool) {
+	conn.multitrack = &enabled
+}
+
+// Multitrack returns whether all streams are written as tracks of a multitrack stream (see SetMultitrack).
+func (conn *Conn) Multitrack() bool {
+	if conn.multitrack != nil {
+		return *conn.multitrack
+	}
+	return conn.peerMultitrack
+}
+
+// streamsToWrite returns which of the streams are written: all of them with multitrack, otherwise only the
+// first video and the first audio stream (the default tracks).
+func streamsToWrite(streams []av.CodecData, multitrack bool) []bool {
+	write := make([]bool, len(streams))
+	video, audio := false, false
+	for i, stream := range streams {
+		switch {
+		case multitrack:
+			write[i] = true
+		case stream.Type().IsVideo() && !video:
+			write[i], video = true, true
+		case stream.Type().IsAudio() && !audio:
+			write[i], audio = true, true
+		}
+	}
+	return write
+}
+
 func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 	if err = conn.prepare(stageCommandDone, prepareWriting); err != nil {
 		return
@@ -1685,12 +1748,27 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 
 	var metadata flvio.AMFMap
 
-	var trackIDs []uint8
-	if trackIDs, err = flv.TrackIDs(streams); err != nil {
-		return
+	writeStreams := streamsToWrite(streams, conn.Multitrack())
+	written := []av.CodecData{}
+	for i, stream := range streams {
+		if writeStreams[i] {
+			written = append(written, stream)
+		}
 	}
 
-	if metadata, err = flv.NewMetadataByStreams(streams); err != nil {
+	var writtenTrackIDs []uint8
+	if writtenTrackIDs, err = flv.TrackIDs(written); err != nil {
+		return
+	}
+	trackIDs := make([]uint8, len(streams))
+	for i, n := 0, 0; i < len(streams); i++ {
+		if writeStreams[i] {
+			trackIDs[i] = writtenTrackIDs[n]
+			n++
+		}
+	}
+
+	if metadata, err = flv.NewMetadataByStreams(written); err != nil {
 		return
 	}
 
@@ -1712,6 +1790,9 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 	// > Videodata(decoder config)
 	// > Audiodata(decoder config)
 	for i, stream := range streams {
+		if !writeStreams[i] {
+			continue
+		}
 		var ok bool
 		var tag flvio.Tag
 		if tag, ok, err = flv.CodecDataToTag(stream); err != nil {
@@ -1726,6 +1807,7 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 
 	conn.streams = streams
 	conn.trackIDs = trackIDs
+	conn.writeStreams = writeStreams
 	conn.stage++
 
 	// the peer is not required to send anything while a client publishes or a server sends to a player
