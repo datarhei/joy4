@@ -2871,8 +2871,9 @@ func TestWriteColorInfo(t *testing.T) {
 }
 
 func TestConnectFourCC(t *testing.T) {
-	fourCcList := flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1"}
+	fourCcList := flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1", "mp4a"}
 	infoMap := flvio.AMFMap{"av01": 4.0, "vp09": 4.0, "hvc1": 4.0, "vvc1": 4.0}
+	audioInfoMap := flvio.AMFMap{"mp4a": 4.0}
 
 	for _, tc := range []struct {
 		name   string
@@ -2882,6 +2883,7 @@ func TestConnectFourCC(t *testing.T) {
 		{"legacy", flvio.AMFMap{}, false},
 		{"fourCcList", flvio.AMFMap{"fourCcList": flvio.AMFArray{"hvc1"}}, true},
 		{"videoFourCcInfoMap", flvio.AMFMap{"videoFourCcInfoMap": flvio.AMFMap{"*": 4.0}}, true},
+		{"audioFourCcInfoMap", flvio.AMFMap{"audioFourCcInfoMap": flvio.AMFMap{"mp4a": 4.0}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			params := flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"}
@@ -2915,9 +2917,11 @@ func TestConnectFourCC(t *testing.T) {
 			if tc.erTMP {
 				require.Equal(t, fourCcList, properties["fourCcList"])
 				require.Equal(t, infoMap, properties["videoFourCcInfoMap"])
+				require.Equal(t, audioInfoMap, properties["audioFourCcInfoMap"])
 			} else {
 				require.NotContains(t, properties, "fourCcList")
 				require.NotContains(t, properties, "videoFourCcInfoMap")
+				require.NotContains(t, properties, "audioFourCcInfoMap")
 			}
 		})
 	}
@@ -2944,8 +2948,9 @@ func TestClientConnectFourCC(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1"}, params["fourCcList"])
+	require.Equal(t, flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1", "mp4a"}, params["fourCcList"])
 	require.Equal(t, flvio.AMFMap{"av01": 4.0, "vp09": 4.0, "hvc1": 4.0, "vvc1": 4.0}, params["videoFourCcInfoMap"])
+	require.Equal(t, flvio.AMFMap{"mp4a": 4.0}, params["audioFourCcInfoMap"])
 }
 
 func TestWriteAVTagInvalidType(t *testing.T) {
@@ -3134,4 +3139,41 @@ func TestReadModEx(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte{0xA1}, pkt.Data)
 	require.Equal(t, int64(40), pkt.Time)
+}
+
+func TestReadExAudio(t *testing.T) {
+	// AAC with the ExAudioTagHeader (E-RTMP v2), with a multichannel config and an Opus frame in between
+	audio := func(timestamp uint32, payload ...byte) []byte {
+		return chunkMessage(4, timestamp, msgtypeidAudioMsg, 1, payload, 128)
+	}
+
+	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live", "audioFourCcInfoMap": flvio.AMFMap{"mp4a": 4.0}})
+	data = append(data, commandMessage("createStream", 2.0, nil)...)
+	data = append(data, commandMessage("publish", 3.0, nil, "test", "live")...)
+	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"audiocodecid": "mp4a"})...)
+	data = concat(data,
+		audio(0, 0x90, 'm', 'p', '4', 'a', 0x12, 0x10),
+		audio(0, 0x94, 'm', 'p', '4', 'a', 0x01, 0x02, 0x00, 0x00, 0x00, 0x03),
+		audio(0, 0x91, 'm', 'p', '4', 'a', 0xA0),
+		audio(23, 0x91, 'O', 'p', 'u', 's', 0xB0),
+		audio(23, 0x97, 0x02, 0x07, 0xA1, 0x20, 0x01, 'm', 'p', '4', 'a', 0xA1),
+	)
+
+	conn := newReadConn(data)
+	conn.isserver = true
+	conn.stage = stageHandshakeDone
+
+	streams, err := conn.Streams()
+	require.NoError(t, err)
+	require.Len(t, streams, 1)
+	require.Equal(t, av.AAC, streams[0].Type())
+
+	for i, expected := range []av.Packet{
+		{Data: []byte{0xA0}, Time: 0, IsKeyFrame: true},
+		{Data: []byte{0xA1}, Time: 23, IsKeyFrame: true},
+	} {
+		pkt, err := conn.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, expected, pkt, "packet %d", i)
+	}
 }

@@ -708,3 +708,69 @@ func TestProberMidStreamSequenceHeaderIgnored(t *testing.T) {
 		require.Equal(t, keyFrame, pkt.Data, name)
 	}
 }
+
+func exAudioTag(fourcc [4]byte, packetType uint8, data []byte) flvio.Tag {
+	return flvio.Tag{Type: flvio.TAG_AUDIO, SoundFormat: flvio.SOUND_EXHEADER, IsExHeader: true, PacketType: packetType, FourCC: fourcc, Data: data}
+}
+
+func TestProberExAudioAAC(t *testing.T) {
+	prober := NewProber(0)
+	prober.PushMetadata(flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_AAC)})
+	require.True(t, prober.HasAudio)
+
+	// a frame before the sequence start is cached
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_AAC, flvio.PKTTYPE_CODED_FRAMES, []byte{0xA0}), 0))
+	require.False(t, prober.Probed())
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_AAC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x12, 0x10}), 0))
+	require.True(t, prober.Probed())
+	require.Len(t, prober.Streams, 1)
+	stream, ok := prober.Streams[0].(aacparser.CodecData)
+	require.True(t, ok)
+	require.Equal(t, 44100, stream.SampleRate())
+
+	require.False(t, prober.Empty())
+	pkt := prober.PopPacket()
+	require.Equal(t, []byte{0xA0}, pkt.Data)
+	require.True(t, prober.Empty())
+
+	pkt, ok = prober.TagToPacket(exAudioTag(flvio.FOURCC_AAC, flvio.PKTTYPE_CODED_FRAMES, []byte{0xA1}), 23)
+	require.True(t, ok)
+	require.Equal(t, []byte{0xA1}, pkt.Data)
+	require.Equal(t, int64(23), pkt.Time)
+	require.True(t, pkt.IsKeyFrame)
+
+	// a legacy AAC frame belongs to the same stream
+	pkt, ok = prober.TagToPacket(aacTag(flvio.AAC_RAW, []byte{0xA2}), 46)
+	require.True(t, ok)
+	require.Equal(t, []byte{0xA2}, pkt.Data)
+
+	// other packet types and codecs are not passed on
+	for _, tag := range []flvio.Tag{
+		exAudioTag(flvio.FOURCC_AAC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x12, 0x10}),
+		exAudioTag(flvio.FOURCC_AAC, flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG, []byte{0x01, 0x02, 0x00, 0x00, 0x00, 0x03}),
+		exAudioTag(flvio.FOURCC_AAC, flvio.PKTTYPE_SEQUENCE_END, nil),
+		exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_CODED_FRAMES, []byte{0xA3}),
+	} {
+		_, ok = prober.TagToPacket(tag, 69)
+		require.False(t, ok)
+	}
+}
+
+func TestProberExAudioUnsupportedCodec(t *testing.T) {
+	// Opus isn't supported: the metadata doesn't enable audio and its frames are dropped
+	prober := NewProber(0)
+	prober.PushMetadata(flvio.AMFMap{
+		"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_VVC),
+		"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_OPUS),
+	})
+	require.True(t, prober.HasVideo)
+	require.False(t, prober.HasAudio)
+
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_SEQUENCE_START, []byte("OpusHead")), 0))
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_CODED_FRAMES, []byte{0xA0}), 0))
+	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x01}), 0))
+	require.True(t, prober.Probed())
+	require.Len(t, prober.Streams, 1)
+	require.Equal(t, av.VVC, prober.Streams[0].Type())
+	require.True(t, prober.Empty())
+}

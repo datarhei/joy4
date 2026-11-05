@@ -31,6 +31,7 @@ const (
 	SOUND_NELLYMOSER            = 6
 	SOUND_ALAW                  = 7
 	SOUND_MULAW                 = 8
+	SOUND_EXHEADER              = 9 // ExAudioTagHeader (E-RTMP v2)
 	SOUND_AAC                   = 10
 	SOUND_SPEEX                 = 11
 
@@ -70,6 +71,24 @@ const (
 	PKTTYPE_MPEG2TS_SEQUENCE_START = 5
 	PKTTYPE_MULTITRACK             = 6
 	PKTTYPE_MODEX                  = 7
+)
+
+// The audio packet types of the ExAudioTagHeader (E-RTMP v2) that differ from the video packet types.
+// SequenceStart, CodedFrames, SequenceEnd and ModEx are the same as PKTTYPE_SEQUENCE_START,
+// PKTTYPE_CODED_FRAMES, PKTTYPE_SEQUENCE_END and PKTTYPE_MODEX.
+const (
+	AUDIO_PKTTYPE_MULTICHANNEL_CONFIG = 4
+	AUDIO_PKTTYPE_MULTITRACK          = 5
+)
+
+// The FourCCs of the audio codecs of the ExAudioTagHeader (E-RTMP v2).
+var (
+	FOURCC_AAC  = [4]byte{'m', 'p', '4', 'a'}
+	FOURCC_OPUS = [4]byte{'O', 'p', 'u', 's'}
+	FOURCC_FLAC = [4]byte{'f', 'L', 'a', 'C'}
+	FOURCC_AC3  = [4]byte{'a', 'c', '-', '3'}
+	FOURCC_EAC3 = [4]byte{'e', 'c', '-', '3'}
+	FOURCC_MP3  = [4]byte{'.', 'm', 'p', '3'}
 )
 
 // The types of ModEx data (E-RTMP v2, VideoPacketModExType and AudioPacketModExType).
@@ -168,7 +187,8 @@ type Tag struct {
 	FrameType uint8
 
 	/*
-		FrameType & 0b1000 != 0
+		Video: FrameType & 0b1000 != 0 (ExVideoTagHeader)
+		Audio: SoundFormat == 9 (ExAudioTagHeader)
 	*/
 	IsExHeader bool
 
@@ -223,6 +243,53 @@ func (t Tag) ChannelLayout() av.ChannelLayout {
 	}
 }
 
+// The channel orders of a MultichannelConfig (E-RTMP v2, AudioChannelOrder).
+const (
+	AUDIO_CHANNEL_ORDER_UNSPECIFIED = 0
+	AUDIO_CHANNEL_ORDER_NATIVE      = 1
+	AUDIO_CHANNEL_ORDER_CUSTOM      = 2
+)
+
+// MultichannelConfig is the data of an audio packet of the type MultichannelConfig (E-RTMP v2).
+type MultichannelConfig struct {
+	ChannelOrder uint8
+	ChannelCount uint8
+
+	// the speaker (AudioChannel) of each channel, with AUDIO_CHANNEL_ORDER_CUSTOM
+	ChannelMapping []uint8
+
+	// the present channels (AudioChannelMask), with AUDIO_CHANNEL_ORDER_NATIVE
+	ChannelFlags uint32
+}
+
+// ParseMultichannelConfig parses the data of an audio packet of the type MultichannelConfig (E-RTMP v2).
+func ParseMultichannelConfig(data []byte) (config MultichannelConfig, err error) {
+	if len(data) < 2 {
+		err = fmt.Errorf("audiodata: multichannel config invalid: not enough bytes")
+		return
+	}
+	config.ChannelOrder = data[0]
+	config.ChannelCount = data[1]
+
+	switch config.ChannelOrder {
+	case AUDIO_CHANNEL_ORDER_CUSTOM:
+		if len(data) < 2+int(config.ChannelCount) {
+			err = fmt.Errorf("audiodata: multichannel config invalid: not enough bytes for the channel mapping")
+			return
+		}
+		config.ChannelMapping = append([]uint8(nil), data[2:2+int(config.ChannelCount)]...)
+
+	case AUDIO_CHANNEL_ORDER_NATIVE:
+		if len(data) < 6 {
+			err = fmt.Errorf("audiodata: multichannel config invalid: not enough bytes for the channel flags")
+			return
+		}
+		config.ChannelFlags = pio.U32BE(data[2:])
+	}
+
+	return
+}
+
 func (t *Tag) audioParseHeader(b []byte) (n int, err error) {
 	if len(b) < n+1 {
 		err = fmt.Errorf("audiodata: parse invalid")
@@ -232,6 +299,32 @@ func (t *Tag) audioParseHeader(b []byte) (n int, err error) {
 	flags := b[n]
 	n++
 	t.SoundFormat = flags >> 4
+
+	if t.SoundFormat == SOUND_EXHEADER {
+		// ExAudioTagHeader (E-RTMP v2): the lower 4 bits are the AudioPacketType
+		t.IsExHeader = true
+		t.PacketType = flags & 0x0f
+
+		if n, err = t.parseModEx(b, n); err != nil {
+			err = fmt.Errorf("audiodata: %w", err)
+			return
+		}
+
+		if t.PacketType == AUDIO_PKTTYPE_MULTITRACK {
+			// not supported yet, the data starts with the multitrack type
+			return
+		}
+
+		if len(b) < n+4 {
+			err = fmt.Errorf("audiodata: parse invalid: not enough bytes for the fourCC value")
+			return
+		}
+		copy(t.FourCC[:], b[n:n+4])
+		n += 4
+
+		return
+	}
+
 	t.SoundRate = (flags >> 2) & 0x3
 	t.SoundSize = (flags >> 1) & 0x1
 	t.SoundType = flags & 0x1
@@ -250,6 +343,14 @@ func (t *Tag) audioParseHeader(b []byte) (n int, err error) {
 }
 
 func (t Tag) audioFillHeader(b []byte) (n int) {
+	if t.IsExHeader {
+		b[n] = SOUND_EXHEADER<<4 | t.PacketType&0x0f
+		n++
+		copy(b[n:], t.FourCC[:])
+		n += 4
+		return
+	}
+
 	var flags uint8
 	flags |= t.SoundFormat << 4
 	flags |= t.SoundRate << 2

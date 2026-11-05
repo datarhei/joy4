@@ -333,3 +333,97 @@ func TestVideoParseHeaderModExMetadataCommand(t *testing.T) {
 	require.Equal(t, uint8(FRAME_COMMAND), tag.FrameType)
 	require.Equal(t, uint8(PKTTYPE_CODED_FRAMES), tag.PacketType)
 }
+
+func TestAudioParseHeaderExHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		data       []byte
+		packetType uint8
+		fourCC     [4]byte
+	}{
+		{"sequence start", []byte{0x90, 'm', 'p', '4', 'a', 0x12, 0x10}, PKTTYPE_SEQUENCE_START, FOURCC_AAC},
+		{"coded frames", []byte{0x91, 'm', 'p', '4', 'a', 0xAA}, PKTTYPE_CODED_FRAMES, FOURCC_AAC},
+		{"sequence end", []byte{0x92, 'O', 'p', 'u', 's', 0xAA}, PKTTYPE_SEQUENCE_END, FOURCC_OPUS},
+		// as FFmpeg writes it for mono Opus
+		{"multichannel config", []byte{0x94, 'O', 'p', 'u', 's', 0x01, 0x01, 0x00, 0x00, 0x00, 0x04}, AUDIO_PKTTYPE_MULTICHANNEL_CONFIG, FOURCC_OPUS},
+	} {
+		tag := Tag{Type: TAG_AUDIO}
+		n, err := tag.ParseHeader(tc.data)
+		require.NoError(t, err, tc.name)
+		require.Equal(t, 5, n, tc.name)
+		require.True(t, tag.IsExHeader, tc.name)
+		require.Equal(t, uint8(SOUND_EXHEADER), tag.SoundFormat, tc.name)
+		require.Equal(t, tc.packetType, tag.PacketType, tc.name)
+		require.Equal(t, tc.fourCC, tag.FourCC, tc.name)
+
+		b := make([]byte, MaxTagSubHeaderLength)
+		require.Equal(t, tc.data[:5], b[:tag.FillHeader(b)], tc.name)
+
+		for i := 1; i < 5; i++ {
+			tag := Tag{Type: TAG_AUDIO}
+			_, err := tag.ParseHeader(tc.data[:i])
+			require.Error(t, err, "%s: %d bytes", tc.name, i)
+		}
+	}
+}
+
+func TestAudioParseHeaderExHeaderModEx(t *testing.T) {
+	// CodedFrames with a TimestampOffsetNano of 500000 ns
+	b := []byte{0x97, 0x02, 0x07, 0xA1, 0x20, 0x01, 'm', 'p', '4', 'a', 0xAA}
+	tag := Tag{Type: TAG_AUDIO}
+	n, err := tag.ParseHeader(b)
+	require.NoError(t, err)
+	require.Equal(t, len(b)-1, n)
+	require.Equal(t, uint8(PKTTYPE_CODED_FRAMES), tag.PacketType)
+	require.Equal(t, FOURCC_AAC, tag.FourCC)
+	require.Equal(t, uint32(500000), tag.TimestampNanoOffset)
+
+	for i := 1; i < n; i++ {
+		tag := Tag{Type: TAG_AUDIO}
+		_, err := tag.ParseHeader(b[:i])
+		require.Error(t, err, "%d bytes", i)
+	}
+}
+
+func TestAudioParseHeaderExHeaderMultitrack(t *testing.T) {
+	// multitrack isn't supported yet, the header ends after the packet type
+	tag := Tag{Type: TAG_AUDIO}
+	n, err := tag.ParseHeader([]byte{0x95, 0x00, 'm', 'p', '4', 'a', 0x01, 0xAA})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.True(t, tag.IsExHeader)
+	require.Equal(t, uint8(AUDIO_PKTTYPE_MULTITRACK), tag.PacketType)
+}
+
+func TestAudioParseHeaderLegacy(t *testing.T) {
+	tag := Tag{Type: TAG_AUDIO}
+	n, err := tag.ParseHeader([]byte{0xAF, 0x01, 0xAA})
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.False(t, tag.IsExHeader)
+	require.Equal(t, uint8(SOUND_AAC), tag.SoundFormat)
+	require.Equal(t, uint8(AAC_RAW), tag.AACPacketType)
+
+	b := make([]byte, MaxTagSubHeaderLength)
+	require.Equal(t, []byte{0xAF, 0x01}, b[:tag.FillHeader(b)])
+}
+
+func TestParseMultichannelConfig(t *testing.T) {
+	// 5.1 as FFmpeg writes it for Opus
+	config, err := ParseMultichannelConfig([]byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x3f})
+	require.NoError(t, err)
+	require.Equal(t, MultichannelConfig{ChannelOrder: AUDIO_CHANNEL_ORDER_NATIVE, ChannelCount: 6, ChannelFlags: 0x3f}, config)
+
+	config, err = ParseMultichannelConfig([]byte{0x02, 0x02, 0x01, 0x00})
+	require.NoError(t, err)
+	require.Equal(t, MultichannelConfig{ChannelOrder: AUDIO_CHANNEL_ORDER_CUSTOM, ChannelCount: 2, ChannelMapping: []uint8{0x01, 0x00}}, config)
+
+	config, err = ParseMultichannelConfig([]byte{0x00, 0x08})
+	require.NoError(t, err)
+	require.Equal(t, MultichannelConfig{ChannelOrder: AUDIO_CHANNEL_ORDER_UNSPECIFIED, ChannelCount: 8}, config)
+
+	for _, b := range [][]byte{{}, {0x00}, {0x01, 0x06, 0x00, 0x00, 0x00}, {0x02, 0x02, 0x01}} {
+		_, err := ParseMultichannelConfig(b)
+		require.Error(t, err, "%x", b)
+	}
+}

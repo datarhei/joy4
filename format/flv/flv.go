@@ -273,20 +273,24 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 		}
 
 	case flvio.TAG_AUDIO:
+		if tag.IsExHeader {
+			// ExAudioTagHeader (E-RTMP v2), only AAC is supported
+			if tag.FourCC == flvio.FOURCC_AAC {
+				switch tag.PacketType {
+				case flvio.PKTTYPE_SEQUENCE_START:
+					err = prober.pushAACConfig(tag.Data)
+				case flvio.PKTTYPE_CODED_FRAMES:
+					prober.CacheTag(tag, timestamp)
+				}
+			}
+			return
+		}
+
 		switch tag.SoundFormat {
 		case flvio.SOUND_AAC:
 			switch tag.AACPacketType {
 			case flvio.AAC_SEQHDR:
-				if !prober.GotAudio {
-					var stream aacparser.CodecData
-					if stream, err = aacparser.NewCodecDataFromMPEG4AudioConfigBytes(tag.Data); err != nil {
-						err = fmt.Errorf("flv: aac seqhdr invalid")
-						return
-					}
-					prober.AudioStreamIdx = len(prober.Streams)
-					prober.Streams = append(prober.Streams, stream)
-					prober.GotAudio = true
-				}
+				err = prober.pushAACConfig(tag.Data)
 
 			case flvio.AAC_RAW:
 				prober.CacheTag(tag, timestamp)
@@ -314,6 +318,21 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 	}
 
 	return
+}
+
+// pushAACConfig creates the audio stream from the AudioSpecificConfig of the first AAC sequence header.
+func (prober *Prober) pushAACConfig(config []byte) error {
+	if prober.GotAudio {
+		return nil
+	}
+	stream, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes(config)
+	if err != nil {
+		return fmt.Errorf("flv: aac seqhdr invalid")
+	}
+	prober.AudioStreamIdx = len(prober.Streams)
+	prober.Streams = append(prober.Streams, stream)
+	prober.GotAudio = true
+	return nil
 }
 
 // Err returns the last error of PushTag, or nil.
@@ -373,8 +392,11 @@ func isSupportedAudioCodecID(id interface{}) bool {
 		case flvio.SOUND_AAC, flvio.SOUND_SPEEX, flvio.SOUND_NELLYMOSER, flvio.SOUND_NELLYMOSER_16KHZ_MONO, flvio.SOUND_NELLYMOSER_8KHZ_MONO:
 			return true
 		}
+		if id == flvio.FourCCToFloat(flvio.FOURCC_AAC) {
+			return true
+		}
 	case string:
-		return id == "mp4a"
+		return id == string(flvio.FOURCC_AAC[:])
 	}
 	return false
 }
@@ -462,6 +484,12 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 		}
 
 	case flvio.TAG_AUDIO:
+		if tag.IsExHeader {
+			if tag.FourCC == flvio.FOURCC_AAC {
+				return av.AAC
+			}
+			return 0
+		}
 		switch tag.SoundFormat {
 		case flvio.SOUND_AAC:
 			return av.AAC
@@ -604,6 +632,15 @@ func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet
 
 	case flvio.TAG_AUDIO:
 		pkt.Idx = int8(prober.AudioStreamIdx)
+		if tag.IsExHeader {
+			// other packet types (e.g. a multichannel config) are not passed on
+			if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES {
+				ok = true
+				pkt.Data = tag.Data
+				pkt.IsKeyFrame = true
+			}
+			break
+		}
 		switch tag.SoundFormat {
 		case flvio.SOUND_AAC:
 			switch tag.AACPacketType {

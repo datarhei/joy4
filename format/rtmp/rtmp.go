@@ -901,15 +901,21 @@ var CodecTypes = flv.CodecTypes
 // videoFourCCs are the FourCCs of the supported E-RTMP video codecs.
 var videoFourCCs = [][4]byte{flvio.FOURCC_AV1, flvio.FOURCC_VP9, flvio.FOURCC_HEVC, flvio.FOURCC_VVC}
 
+// audioFourCCs are the FourCCs of the supported E-RTMP audio codecs (E-RTMP v2).
+var audioFourCCs = [][4]byte{flvio.FOURCC_AAC}
+
 // fourCcCanForward is the flag of the FourCcInfoMask (E-RTMP v2) for a codec that can be forwarded. joy4
 // neither decodes nor encodes.
 const fourCcCanForward = 0x04
 
-// videoFourCcList returns the supported video codecs for the fourCcList property of the connect command
-// and its result (E-RTMP).
-func videoFourCcList() flvio.AMFArray {
+// fourCcList returns the supported video and audio codecs for the fourCcList property of the connect
+// command and its result (E-RTMP).
+func fourCcList() flvio.AMFArray {
 	list := flvio.AMFArray{}
 	for _, fourCC := range videoFourCCs {
+		list = append(list, string(fourCC[:]))
+	}
+	for _, fourCC := range audioFourCCs {
 		list = append(list, string(fourCC[:]))
 	}
 	return list
@@ -918,8 +924,18 @@ func videoFourCcList() flvio.AMFArray {
 // videoFourCcInfoMap returns the supported video codecs for the videoFourCcInfoMap property of the connect
 // command and its result (E-RTMP v2).
 func videoFourCcInfoMap() flvio.AMFMap {
+	return fourCcInfoMap(videoFourCCs)
+}
+
+// audioFourCcInfoMap returns the supported audio codecs for the audioFourCcInfoMap property of the connect
+// command and its result (E-RTMP v2).
+func audioFourCcInfoMap() flvio.AMFMap {
+	return fourCcInfoMap(audioFourCCs)
+}
+
+func fourCcInfoMap(fourCCs [][4]byte) flvio.AMFMap {
 	infoMap := flvio.AMFMap{}
-	for _, fourCC := range videoFourCCs {
+	for _, fourCC := range fourCCs {
 		infoMap[string(fourCC[:])] = fourCcCanForward
 	}
 	return infoMap
@@ -994,9 +1010,11 @@ func (conn *Conn) readConnect() (err error) {
 	// a client that supports E-RTMP gets the supported codecs (E-RTMP v2 recommends it)
 	_, hasFourCcList := conn.commandobj["fourCcList"]
 	_, hasVideoFourCcInfoMap := conn.commandobj["videoFourCcInfoMap"]
-	if hasFourCcList || hasVideoFourCcInfoMap {
-		properties["fourCcList"] = videoFourCcList()
+	_, hasAudioFourCcInfoMap := conn.commandobj["audioFourCcInfoMap"]
+	if hasFourCcList || hasVideoFourCcInfoMap || hasAudioFourCcInfoMap {
+		properties["fourCcList"] = fourCcList()
 		properties["videoFourCcInfoMap"] = videoFourCcInfoMap()
+		properties["audioFourCcInfoMap"] = audioFourCcInfoMap()
 	}
 
 	// > _result("NetConnection.Connect.Success")
@@ -1276,8 +1294,9 @@ func (conn *Conn) writeConnect(path string) (err error) {
 			"audioCodecs":        4071,
 			"videoCodecs":        252,
 			"videoFunction":      1,
-			"fourCcList":         videoFourCcList(),
+			"fourCcList":         fourCcList(),
 			"videoFourCcInfoMap": videoFourCcInfoMap(),
+			"audioFourCcInfoMap": audioFourCcInfoMap(),
 		},
 	); err != nil {
 		return
