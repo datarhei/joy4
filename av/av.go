@@ -126,6 +126,7 @@ var (
 	SPEEX      = MakeAudioCodecType(avCodecTypeMagic + 4)
 	NELLYMOSER = MakeAudioCodecType(avCodecTypeMagic + 5)
 	OPUS       = MakeAudioCodecType(avCodecTypeMagic + 6)
+	FLAC       = MakeAudioCodecType(avCodecTypeMagic + 7)
 )
 
 const codecTypeAudioBit = 0x1
@@ -155,6 +156,8 @@ func (c CodecType) String() string {
 		return "NELLYMOSER"
 	case OPUS:
 		return "OPUS"
+	case FLAC:
+		return "FLAC"
 	}
 	return ""
 }

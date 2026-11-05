@@ -10,6 +10,7 @@ import (
 	"github.com/datarhei/joy4/codec"
 	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/codec/fake"
+	"github.com/datarhei/joy4/codec/flacparser"
 	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/codec/hevcparser"
 	"github.com/datarhei/joy4/codec/opusparser"
@@ -474,12 +475,14 @@ func TestProberPushMetadata(t *testing.T) {
 		{flvio.AMFMap{"audiocodecid": 4.0}, false, true},
 		{flvio.AMFMap{"audiocodecid": 5.0}, false, true},
 		{flvio.AMFMap{"audiocodecid": 6.0}, false, true},
-		// unsupported: H.263, VP6, MP3, ADPCM, Opus FourCC as a string
+		// unsupported: H.263, VP6, MP3, ADPCM, an unknown FourCC
 		{flvio.AMFMap{"videocodecid": 2.0, "audiocodecid": 2.0}, false, false},
 		{flvio.AMFMap{"videocodecid": 4.0, "audiocodecid": 1.0}, false, false},
 		{flvio.AMFMap{"videocodecid": "VP62", "audiocodecid": ".mp3"}, false, false},
 		{flvio.AMFMap{"audiocodecid": "Opus"}, false, true},
 		{flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_OPUS)}, false, true},
+		{flvio.AMFMap{"audiocodecid": "fLaC"}, false, true},
+		{flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_FLAC)}, false, true},
 		{flvio.AMFMap{"audiocodecid": "abcd"}, false, false},
 		{flvio.AMFMap{"videocodecid": nil, "audiocodecid": true}, false, false},
 	}
@@ -1188,4 +1191,137 @@ func TestMuxDemuxOpus(t *testing.T) {
 	require.Equal(t, flvio.FourCCToFloat(flvio.FOURCC_OPUS), metadata["audiocodecid"])
 	require.Equal(t, 48000, metadata["audiosamplerate"])
 	require.Equal(t, flvio.AMFMap{"1": flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_OPUS), "samplerate": 48000, "channels": 2}}, metadata["audioTrackIdInfoMap"])
+}
+
+// the STREAMINFO of 48 kHz 5.1 16 bit FLAC, as FFmpeg writes it (without the "fLaC" marker), at the start
+// and at the end of the stream (with the total samples, frame sizes and MD5)
+const (
+	flacStreamInfo51      = "040004000000000030240bb80af00000000000000000000000000000000000000000"
+	flacStreamInfo51Final = "040004000000fc00018b0bb80af0000232800e9d7dce5ba2b3c21e0da827578eebfe"
+)
+
+func TestProberFLAC(t *testing.T) {
+	// as FFmpeg writes FLAC: the STREAMINFO, the multichannel config and the frames, and at the end the
+	// final STREAMINFO, the multichannel config and an empty frame
+	frame := decodeHex(t, "fff8aa5800e14c000000eb")
+	lastFrame := decodeHex(t, "fff87a58c28c027f7c4c0b")
+
+	prober := NewProber(0)
+	prober.PushMetadata(flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_FLAC)})
+	require.True(t, prober.HasAudio)
+	// a frame before the sequence start creates no stream, it is passed on with the stream
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_FLAC, flvio.PKTTYPE_CODED_FRAMES, frame), 0))
+	require.False(t, prober.GotAudio)
+	require.False(t, prober.Probed())
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_FLAC, flvio.PKTTYPE_SEQUENCE_START, decodeHex(t, flacStreamInfo51)), 0))
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_FLAC, flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG, []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x3f}), 0))
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_FLAC, flvio.PKTTYPE_CODED_FRAMES, frame), 21))
+	require.True(t, prober.Probed())
+	require.Len(t, prober.Streams, 1)
+	stream := prober.Streams[0].(flacparser.CodecData)
+	require.Equal(t, av.FLAC, stream.Type())
+	require.Equal(t, 6, stream.ChannelLayout().Count())
+	require.Equal(t, 48000, stream.SampleRate())
+	require.Equal(t, 16, stream.BitsPerSample)
+	require.Equal(t, decodeHex(t, flacStreamInfo51), stream.StreamInfoBytes())
+	duration, err := stream.PacketDuration(frame)
+	require.NoError(t, err)
+	require.Equal(t, 1024*time.Second/48000, duration)
+
+	require.Equal(t, av.Packet{Data: frame, IsKeyFrame: true}, prober.PopPacket())
+	require.Equal(t, av.Packet{Data: frame, IsKeyFrame: true, Time: 21}, prober.PopPacket())
+	require.True(t, prober.Empty())
+
+	// after probing: the last frame is passed on, the final STREAMINFO, the multichannel config and the
+	// empty frame are not
+	for _, tag := range []flvio.Tag{
+		exAudioTag(flvio.FOURCC_FLAC, flvio.PKTTYPE_CODED_FRAMES, lastFrame),
+		exAudioTag(flvio.FOURCC_FLAC, flvio.PKTTYPE_SEQUENCE_START, decodeHex(t, flacStreamInfo51Final)),
+		exAudioTag(flvio.FOURCC_FLAC, flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG, []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x3f}),
+		exAudioTag(flvio.FOURCC_FLAC, flvio.PKTTYPE_CODED_FRAMES, []byte{}),
+	} {
+		pkt, ok := prober.TagToPacket(tag, 3000)
+		if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES && len(tag.Data) != 0 {
+			require.True(t, ok)
+			require.Equal(t, av.Packet{Data: lastFrame, IsKeyFrame: true, Time: 3000}, pkt)
+			duration, err := stream.PacketDuration(pkt.Data)
+			require.NoError(t, err)
+			require.Equal(t, 640*time.Second/48000, duration)
+			continue
+		}
+		require.False(t, ok, "packet type %d", tag.PacketType)
+	}
+
+	// the sequence start with the "fLaC" marker (E-RTMP v2)
+	header := append([]byte("fLaC\x80\x00\x00\x22"), decodeHex(t, flacStreamInfo51)...)
+	prober = NewProber(0)
+	prober.HasAudio = true
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_FLAC, flvio.PKTTYPE_SEQUENCE_START, header), 0))
+	pushCodedFrame(t, prober)
+	require.True(t, prober.Probed())
+	require.Len(t, prober.Streams, 1)
+	require.Equal(t, stream.StreamInfoBytes(), prober.Streams[0].(flacparser.CodecData).StreamInfoBytes())
+	require.Equal(t, header, prober.Streams[0].(flacparser.CodecData).SequenceHeaderBytes())
+
+	// an invalid sequence start
+	prober = NewProber(0)
+	require.Error(t, prober.PushTag(exAudioTag(flvio.FOURCC_FLAC, flvio.PKTTYPE_SEQUENCE_START, []byte("fLaC")), 0))
+}
+
+func TestMuxDemuxFLAC(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+	// as FFmpeg writes the sequence start (the STREAMINFO alone), and a stream without one
+	flac51, err := flacparser.NewCodecDataFromSequenceHeader(decodeHex(t, flacStreamInfo51))
+	require.NoError(t, err)
+	flacMono, err := flacparser.NewCodecDataFromStreamInfo(decodeHex(t, "040004000000000008150bb800f00000000000000000000000000000000000000000"))
+	require.NoError(t, err)
+
+	// FLAC as the default track and as track 1
+	streams := []av.CodecData{h264, flac51, flacMono}
+	packets := []av.Packet{
+		{Idx: 0, IsKeyFrame: true, Data: []byte{0xA0}},
+		{Idx: 1, IsKeyFrame: true, Data: decodeHex(t, "fff8aa5800e14c000000eb")},
+		{Idx: 2, IsKeyFrame: true, Data: decodeHex(t, "fff8aa0800ed4c000000eb")},
+		{Idx: 1, IsKeyFrame: true, Data: decodeHex(t, "fff8aa5801e64c0a7409bd"), Time: 21},
+	}
+
+	buf := &bytes.Buffer{}
+	muxer := NewMuxer(buf)
+	require.NoError(t, muxer.WriteHeader(streams))
+	for _, pkt := range packets {
+		require.NoError(t, muxer.WritePacket(pkt))
+	}
+	require.NoError(t, muxer.WriteTrailer())
+
+	// the sequence start is written as it was received, or with the "fLaC" marker (E-RTMP v2)
+	tag, ok, err := CodecDataToTag(flac51)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, tag.IsExHeader)
+	require.Equal(t, flvio.FOURCC_FLAC, tag.FourCC)
+	require.Equal(t, decodeHex(t, flacStreamInfo51), tag.Data)
+	tag, ok, err = CodecDataToTag(flacMono)
+	require.NoError(t, err)
+	require.True(t, ok)
+	monoHeader := append([]byte("fLaC\x80\x00\x00\x22"), flacMono.StreamInfoBytes()...)
+	require.Equal(t, monoHeader, tag.Data)
+	flacMonoHeader, err := flacparser.NewCodecDataFromSequenceHeader(monoHeader)
+	require.NoError(t, err)
+
+	demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+	got, err := demuxer.Streams()
+	require.NoError(t, err)
+	require.Equal(t, []av.CodecData{h264, flac51, flacMonoHeader}, got)
+	for i, expected := range packets {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, expected, pkt, "packet %d", i)
+	}
+
+	metadata, err := NewMetadataByStreams(streams)
+	require.NoError(t, err)
+	require.Equal(t, flvio.FourCCToFloat(flvio.FOURCC_FLAC), metadata["audiocodecid"])
+	require.Equal(t, 48000, metadata["audiosamplerate"])
+	require.Equal(t, flvio.AMFMap{"1": flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_FLAC), "samplerate": 48000, "channels": 1}}, metadata["audioTrackIdInfoMap"])
 }
