@@ -269,6 +269,19 @@ const (
 	AUDIO_CHANNEL_ORDER_CUSTOM      = 2
 )
 
+// The channels of the channel flags of a MultichannelConfig (E-RTMP v2, AudioChannelMask), the common ones.
+const (
+	AUDIO_CHANNEL_MASK_FRONT_LEFT     = 0x000001
+	AUDIO_CHANNEL_MASK_FRONT_RIGHT    = 0x000002
+	AUDIO_CHANNEL_MASK_FRONT_CENTER   = 0x000004
+	AUDIO_CHANNEL_MASK_LOW_FREQUENCY1 = 0x000008
+	AUDIO_CHANNEL_MASK_BACK_LEFT      = 0x000010
+	AUDIO_CHANNEL_MASK_BACK_RIGHT     = 0x000020
+	AUDIO_CHANNEL_MASK_BACK_CENTER    = 0x000100
+	AUDIO_CHANNEL_MASK_SIDE_LEFT      = 0x000200
+	AUDIO_CHANNEL_MASK_SIDE_RIGHT     = 0x000400
+)
+
 // MultichannelConfig is the data of an audio packet of the type MultichannelConfig (E-RTMP v2).
 type MultichannelConfig struct {
 	ChannelOrder uint8
@@ -307,6 +320,19 @@ func ParseMultichannelConfig(data []byte) (config MultichannelConfig, err error)
 	}
 
 	return
+}
+
+// Bytes returns the data of an audio packet of the type MultichannelConfig.
+func (config MultichannelConfig) Bytes() []byte {
+	b := []byte{config.ChannelOrder, config.ChannelCount}
+	switch config.ChannelOrder {
+	case AUDIO_CHANNEL_ORDER_CUSTOM:
+		b = append(b, config.ChannelMapping...)
+	case AUDIO_CHANNEL_ORDER_NATIVE:
+		b = append(b, 0, 0, 0, 0)
+		pio.PutU32BE(b[2:], config.ChannelFlags)
+	}
+	return b
 }
 
 func (t *Tag) audioParseHeader(b []byte) (n int, err error) {

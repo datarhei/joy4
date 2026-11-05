@@ -418,6 +418,14 @@ func TestParseMultichannelConfig(t *testing.T) {
 	}
 }
 
+func TestMultichannelConfigBytes(t *testing.T) {
+	for _, b := range [][]byte{{0x01, 0x06, 0x00, 0x00, 0x00, 0x3f}, {0x02, 0x02, 0x01, 0x00}, {0x00, 0x08}} {
+		config, err := ParseMultichannelConfig(b)
+		require.NoError(t, err)
+		require.Equal(t, b, config.Bytes())
+	}
+}
+
 func TestParseHeaderMultitrackOneTrack(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

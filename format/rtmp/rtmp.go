@@ -1793,12 +1793,11 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 		if !writeStreams[i] {
 			continue
 		}
-		var ok bool
-		var tag flvio.Tag
-		if tag, ok, err = flv.TrackCodecDataTag(stream, trackIDs[i]); err != nil {
+		var tags []flvio.Tag
+		if tags, err = flv.TrackCodecDataTags(stream, trackIDs[i]); err != nil {
 			return
 		}
-		if ok {
+		for _, tag := range tags {
 			if err = conn.writeAVTag(tag, 0); err != nil {
 				return
 			}

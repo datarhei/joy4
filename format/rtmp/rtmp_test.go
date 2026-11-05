@@ -3376,8 +3376,15 @@ func TestClientPublishMultitrack(t *testing.T) {
 			require.NoError(t, conn.bufw.Flush())
 
 			tags, metadata := writtenTags(t, buf.Bytes())
-			// a sequence start and a packet per track
-			require.Len(t, tags, 2*tc.tracks)
+			// a sequence start and a packet per track, and the multichannel config of the AAC track 1
+			// (ExAudioTagHeader)
+			if tc.tracks == 4 {
+				require.Len(t, tags, 2*tc.tracks+1)
+				require.Equal(t, uint8(flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG), tags[4].PacketType)
+				require.Equal(t, uint8(1), tags[4].TrackID)
+			} else {
+				require.Len(t, tags, 2*tc.tracks)
+			}
 			ids := map[[2]uint8]bool{}
 			for _, tag := range tags {
 				ids[[2]uint8{tag.Type, tag.TrackID}] = true

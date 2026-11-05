@@ -203,11 +203,15 @@ func audioFourCC(typ av.CodecType) ([4]byte, bool) {
 	return [4]byte{}, false
 }
 
-// TrackCodecDataTag returns the sequence start of the stream as a tag of the track (see CodecDataToTag and
-// TrackTag). MP3 has no sequence start, but as a track from 1 on (ExAudioTagHeader) it gets an empty one, as
-// FFmpeg writes it.
-func TrackCodecDataTag(stream av.CodecData, trackID uint8) (tag flvio.Tag, ok bool, err error) {
-	if tag, ok, err = CodecDataToTag(stream); err != nil {
+// TrackCodecDataTags returns the tags that start the track of the stream (see CodecDataToTag and TrackTag): its
+// sequence start, if it has one, and, as FFmpeg writes it, a multichannel config with the channel layout
+// after the sequence start of the ExAudioTagHeader. FFmpeg's FLV demuxer creates the stream of an audio track
+// with an empty sequence start (e.g. AC-3) only at its multichannel config or its first frame, i.e. without
+// one, the order of FFmpeg's streams wouldn't be the one of the tracks. MP3 has no sequence start, but as a
+// track from 1 on (ExAudioTagHeader) it gets an empty one, as FFmpeg writes it.
+func TrackCodecDataTags(stream av.CodecData, trackID uint8) (tags []flvio.Tag, err error) {
+	tag, ok, err := CodecDataToTag(stream)
+	if err != nil {
 		return
 	}
 	if !ok && trackID != 0 && stream.Type() == av.MP3 {
@@ -220,10 +224,51 @@ func TrackCodecDataTag(stream av.CodecData, trackID uint8) (tag flvio.Tag, ok bo
 		}
 		ok = true
 	}
-	if ok {
-		tag = TrackTag(tag, trackID)
+	if !ok {
+		return
 	}
+
+	tag = TrackTag(tag, trackID)
+	tags = append(tags, tag)
+
+	if tag.Type == flvio.TAG_AUDIO && tag.IsExHeader {
+		layout := stream.(av.AudioCodecData).ChannelLayout()
+		config := flvio.MultichannelConfig{
+			ChannelOrder: flvio.AUDIO_CHANNEL_ORDER_NATIVE,
+			ChannelCount: uint8(layout.Count()),
+			ChannelFlags: channelFlags(layout),
+		}
+		tag.PacketType = flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG
+		tag.Data = config.Bytes()
+		tags = append(tags, tag)
+	}
+
 	return
+}
+
+// channelFlags returns the channel flags (AudioChannelMask) of a MultichannelConfig (E-RTMP v2) of the channel
+// layout.
+func channelFlags(layout av.ChannelLayout) uint32 {
+	var flags uint32
+	for _, c := range []struct {
+		channel av.ChannelLayout
+		flag    uint32
+	}{
+		{av.CH_FRONT_LEFT, flvio.AUDIO_CHANNEL_MASK_FRONT_LEFT},
+		{av.CH_FRONT_RIGHT, flvio.AUDIO_CHANNEL_MASK_FRONT_RIGHT},
+		{av.CH_FRONT_CENTER, flvio.AUDIO_CHANNEL_MASK_FRONT_CENTER},
+		{av.CH_LOW_FREQ, flvio.AUDIO_CHANNEL_MASK_LOW_FREQUENCY1},
+		{av.CH_BACK_LEFT, flvio.AUDIO_CHANNEL_MASK_BACK_LEFT},
+		{av.CH_BACK_RIGHT, flvio.AUDIO_CHANNEL_MASK_BACK_RIGHT},
+		{av.CH_BACK_CENTER, flvio.AUDIO_CHANNEL_MASK_BACK_CENTER},
+		{av.CH_SIDE_LEFT, flvio.AUDIO_CHANNEL_MASK_SIDE_LEFT},
+		{av.CH_SIDE_RIGHT, flvio.AUDIO_CHANNEL_MASK_SIDE_RIGHT},
+	} {
+		if layout&c.channel != 0 {
+			flags |= c.flag
+		}
+	}
+	return flags
 }
 
 // TrackTag returns the tag as a tag of the track (E-RTMP v2 multitrack, OneTrack). The tag of the track 0 is
@@ -1254,7 +1299,7 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 	case av.NELLYMOSER:
 	case av.SPEEX:
 	case av.MP3:
-		// no sequence start, see TrackCodecDataTag
+		// no sequence start, see TrackCodecDataTags
 
 	case av.OPUS:
 		// the ID header, or a minimal one for a stream without one
@@ -1527,12 +1572,11 @@ func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 	}
 
 	for i, stream := range streams {
-		var tag flvio.Tag
-		var ok bool
-		if tag, ok, err = TrackCodecDataTag(stream, trackIDs[i]); err != nil {
+		var tags []flvio.Tag
+		if tags, err = TrackCodecDataTags(stream, trackIDs[i]); err != nil {
 			return
 		}
-		if ok {
+		for _, tag := range tags {
 			if err = flvio.WriteTag(muxer.bufw, tag, 0, muxer.b); err != nil {
 				return
 			}

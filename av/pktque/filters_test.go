@@ -56,7 +56,8 @@ func (d *testDemuxer) ReadPacket() (av.Packet, error) {
 }
 
 func TestFilterDemuxerFirstVideoStream(t *testing.T) {
-	// two video tracks, WaitKeyFrame waits for a key frame of the first one
+	// two video tracks, WaitKeyFrame waits for a key frame of the first one, then each other video track
+	// waits for its own key frame
 	demuxer := FilterDemuxer{
 		Filter: &WaitKeyFrame{},
 		Demuxer: &testDemuxer{
@@ -64,16 +65,28 @@ func TestFilterDemuxerFirstVideoStream(t *testing.T) {
 			packets: []av.Packet{
 				{Idx: 1, IsKeyFrame: true, Time: 0},
 				{Idx: 0, Time: 0},
+				{Idx: 2, IsKeyFrame: true, Time: 0},
 				{Idx: 0, IsKeyFrame: true, Time: 40},
 				{Idx: 1, Time: 40},
+				{Idx: 2, IsKeyFrame: true, Time: 40},
+				{Idx: 0, Time: 80},
+				{Idx: 1, IsKeyFrame: true, Time: 80},
+				{Idx: 1, Time: 120},
+				{Idx: 0, IsKeyFrame: true, Time: 120},
 			},
 		},
 	}
 
-	pkt, err := demuxer.ReadPacket()
-	require.NoError(t, err)
-	require.Equal(t, av.Packet{Idx: 0, IsKeyFrame: true, Time: 40}, pkt)
-	pkt, err = demuxer.ReadPacket()
-	require.NoError(t, err)
-	require.Equal(t, av.Packet{Idx: 1, Time: 40}, pkt)
+	for _, expected := range []av.Packet{
+		{Idx: 0, IsKeyFrame: true, Time: 40},
+		{Idx: 2, IsKeyFrame: true, Time: 40},
+		{Idx: 0, Time: 80},
+		{Idx: 1, IsKeyFrame: true, Time: 80},
+		{Idx: 1, Time: 120},
+		{Idx: 0, IsKeyFrame: true, Time: 120},
+	} {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err)
+		require.Equal(t, expected, pkt)
+	}
 }

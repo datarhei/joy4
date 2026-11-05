@@ -1558,12 +1558,13 @@ func TestMuxDemuxMP3(t *testing.T) {
 	}
 
 	// the default track has no sequence start, a track from 1 on an empty one (ExAudioTagHeader)
-	_, ok, err := TrackCodecDataTag(stereo48k, 0)
+	tags, err := TrackCodecDataTags(stereo48k, 0)
 	require.NoError(t, err)
-	require.False(t, ok)
-	tag, ok, err := TrackCodecDataTag(mono22k, 1)
+	require.Empty(t, tags)
+	tags, err = TrackCodecDataTags(mono22k, 1)
 	require.NoError(t, err)
-	require.True(t, ok)
+	require.Len(t, tags, 2)
+	tag := tags[0]
 	require.True(t, tag.IsExHeader)
 	require.True(t, tag.IsMultitrack)
 	require.Equal(t, uint8(1), tag.TrackID)
@@ -1599,4 +1600,76 @@ func TestMuxDemuxMP3(t *testing.T) {
 	metadata, err = NewMetadataByStreams([]av.CodecData{mono8k})
 	require.NoError(t, err)
 	require.Equal(t, flvio.SOUND_MP3_8KHZ, metadata["audiocodecid"])
+}
+
+func TestTrackCodecDataTags(t *testing.T) {
+	// the tags at the start of the audio tracks of an FFmpeg FLV with AAC, AC-3, FLAC and MP3 (44.1 kHz mono):
+	// AAC as the default track has the legacy header, the other tracks have a sequence start and a
+	// multichannel config (mono)
+	aac, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes(decodeHex(t, "118856e500"))
+	require.NoError(t, err)
+	ac3, err := ac3parser.NewCodecDataFromFrame(decodeHex(t, "0b775f1d0c402f84"))
+	require.NoError(t, err)
+	flac, err := flacparser.NewCodecDataFromSequenceHeader(decodeHex(t, "040004000000000008150bb800f00000000000000000000000000000000000000000"))
+	require.NoError(t, err)
+	mp3, err := mp3parser.NewCodecDataFromFrame(decodeHex(t, "fffb50c4"))
+	require.NoError(t, err)
+
+	streams := []av.CodecData{aac, ac3, flac, mp3}
+	expected := [][]string{
+		{"af00118856e500"},
+		{"950061632d3301", "950461632d3301010100000004"},
+		{"9500664c614302040004000000000008150bb800f00000000000000000000000000000000000000000", "9504664c614302010100000004"},
+		{"95002e6d703303", "95042e6d703303010100000004"},
+	}
+	trackIDs, err := TrackIDs(streams)
+	require.NoError(t, err)
+	for i, stream := range streams {
+		tags, err := TrackCodecDataTags(stream, trackIDs[i])
+		require.NoError(t, err)
+		require.Len(t, tags, len(expected[i]), "%v", stream.Type())
+		for j, tag := range tags {
+			buf := &bytes.Buffer{}
+			require.NoError(t, flvio.WriteTag(buf, tag, 0, make([]byte, 256)))
+			body := buf.Bytes()[flvio.TagHeaderLength : buf.Len()-4]
+			require.Equal(t, expected[i][j], hex.EncodeToString(body), "%v tag %d", stream.Type(), j)
+
+			// it is read back as it was written
+			read, _, err := flvio.ReadTag(bytes.NewReader(buf.Bytes()), make([]byte, 256))
+			require.NoError(t, err)
+			require.Equal(t, tag.PacketType, read.PacketType)
+			require.Equal(t, tag.TrackID, read.TrackID)
+		}
+	}
+
+	// the channel flags of the multichannel config
+	opus51, err := opusparser.NewCodecDataFromOpusHead(decodeHex(t, opusHead51))
+	require.NoError(t, err)
+	tags, err := TrackCodecDataTags(opus51, 0)
+	require.NoError(t, err)
+	require.Len(t, tags, 2)
+	require.False(t, tags[1].IsMultitrack)
+	require.Equal(t, uint8(flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG), tags[1].PacketType)
+	require.Equal(t, flvio.FOURCC_OPUS, tags[1].FourCC)
+	// FL, FR, FC, LFE, BL, BR, as FFmpeg writes 5.1
+	require.Equal(t, []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x3f}, tags[1].Data)
+
+	for _, tc := range []struct {
+		layout av.ChannelLayout
+		flags  uint32
+	}{
+		{av.CH_MONO, 0x04},
+		{av.CH_STEREO, 0x03},
+		{av.CH_2_1, 0x103},
+		{av.CH_SURROUND | av.CH_SIDE_LEFT | av.CH_SIDE_RIGHT | av.CH_LOW_FREQ, 0x60f},
+	} {
+		require.Equal(t, tc.flags, channelFlags(tc.layout), "%v", tc.layout)
+	}
+
+	// video has no multichannel config
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+	tags, err = TrackCodecDataTags(h264, 1)
+	require.NoError(t, err)
+	require.Len(t, tags, 1)
 }

@@ -71,15 +71,35 @@ func (self FilterDemuxer) ReadPacket() (pkt av.Packet, err error) {
 }
 
 // Drop packets until first video key frame arrived.
+// WaitKeyFrame drops the packets before the first key frame of the first video stream. After it, the packets
+// of each other video stream (e.g. the tracks of an E-RTMP v2 multitrack stream) are dropped until the first
+// key frame of that stream, because their key frames are not necessarily at the same time.
 type WaitKeyFrame struct {
 	ok bool
+	// the video streams that had their first key frame
+	started map[int8]bool
 }
 
 func (self *WaitKeyFrame) ModifyPacket(pkt *av.Packet, streams []av.CodecData, videoidx int, audioidx int) (drop bool, err error) {
-	if !self.ok && pkt.Idx == int8(videoidx) && pkt.IsKeyFrame {
+	if !self.ok {
+		if pkt.Idx != int8(videoidx) || !pkt.IsKeyFrame {
+			drop = true
+			return
+		}
 		self.ok = true
 	}
-	drop = !self.ok
+
+	if pkt.Idx >= 0 && int(pkt.Idx) < len(streams) && streams[pkt.Idx].Type().IsVideo() && !self.started[pkt.Idx] {
+		if !pkt.IsKeyFrame {
+			drop = true
+			return
+		}
+		if self.started == nil {
+			self.started = map[int8]bool{}
+		}
+		self.started[pkt.Idx] = true
+	}
+
 	return
 }
 
