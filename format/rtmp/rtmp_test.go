@@ -2874,9 +2874,9 @@ func TestWriteColorInfo(t *testing.T) {
 }
 
 func TestConnectFourCC(t *testing.T) {
-	fourCcList := flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1", "mp4a", "Opus", "fLaC"}
+	fourCcList := flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1", "mp4a", "Opus", "fLaC", "ac-3", "ec-3"}
 	infoMap := flvio.AMFMap{"av01": 4.0, "vp09": 4.0, "hvc1": 4.0, "vvc1": 4.0}
-	audioInfoMap := flvio.AMFMap{"mp4a": 4.0, "Opus": 4.0, "fLaC": 4.0}
+	audioInfoMap := flvio.AMFMap{"mp4a": 4.0, "Opus": 4.0, "fLaC": 4.0, "ac-3": 4.0, "ec-3": 4.0}
 
 	for _, tc := range []struct {
 		name   string
@@ -2957,9 +2957,9 @@ func TestClientConnectFourCC(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1", "mp4a", "Opus", "fLaC"}, params["fourCcList"])
+	require.Equal(t, flvio.AMFArray{"av01", "vp09", "hvc1", "vvc1", "mp4a", "Opus", "fLaC", "ac-3", "ec-3"}, params["fourCcList"])
 	require.Equal(t, flvio.AMFMap{"av01": 4.0, "vp09": 4.0, "hvc1": 4.0, "vvc1": 4.0}, params["videoFourCcInfoMap"])
-	require.Equal(t, flvio.AMFMap{"mp4a": 4.0, "Opus": 4.0, "fLaC": 4.0}, params["audioFourCcInfoMap"])
+	require.Equal(t, flvio.AMFMap{"mp4a": 4.0, "Opus": 4.0, "fLaC": 4.0, "ac-3": 4.0, "ec-3": 4.0}, params["audioFourCcInfoMap"])
 	require.Equal(t, 6.0, params["capsEx"])
 }
 

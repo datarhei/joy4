@@ -9,6 +9,7 @@ import (
 	"github.com/datarhei/joy4/av"
 	"github.com/datarhei/joy4/codec"
 	"github.com/datarhei/joy4/codec/aacparser"
+	"github.com/datarhei/joy4/codec/ac3parser"
 	"github.com/datarhei/joy4/codec/fake"
 	"github.com/datarhei/joy4/codec/flacparser"
 	"github.com/datarhei/joy4/codec/h264parser"
@@ -483,6 +484,10 @@ func TestProberPushMetadata(t *testing.T) {
 		{flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_OPUS)}, false, true},
 		{flvio.AMFMap{"audiocodecid": "fLaC"}, false, true},
 		{flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_FLAC)}, false, true},
+		{flvio.AMFMap{"audiocodecid": "ac-3"}, false, true},
+		{flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_AC3)}, false, true},
+		{flvio.AMFMap{"audiocodecid": "ec-3"}, false, true},
+		{flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_EAC3)}, false, true},
 		{flvio.AMFMap{"audiocodecid": "abcd"}, false, false},
 		{flvio.AMFMap{"videocodecid": nil, "audiocodecid": true}, false, false},
 	}
@@ -1324,4 +1329,144 @@ func TestMuxDemuxFLAC(t *testing.T) {
 	require.Equal(t, flvio.FourCCToFloat(flvio.FOURCC_FLAC), metadata["audiocodecid"])
 	require.Equal(t, 48000, metadata["audiosamplerate"])
 	require.Equal(t, flvio.AMFMap{"1": flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_FLAC), "samplerate": 48000, "channels": 1}}, metadata["audioTrackIdInfoMap"])
+}
+
+// the start of AC-3 and E-AC-3 syncframes from FFmpeg's encoders: 48 kHz stereo and 5.1
+const (
+	ac3FrameStereo  = "0b7761e4144043e106f4"
+	ac3Frame51      = "0b772b9a1e40ebf8403e"
+	eac3FrameStereo = "0b77017f3487c0002084"
+)
+
+func TestProberAC3(t *testing.T) {
+	for _, tc := range []struct {
+		fourCC   [4]byte
+		frame    string
+		typ      av.CodecType
+		channels int
+	}{
+		{flvio.FOURCC_AC3, ac3Frame51, av.AC3, 6},
+		{flvio.FOURCC_EAC3, eac3FrameStereo, av.EAC3, 2},
+	} {
+		name := string(tc.fourCC[:])
+		frame := decodeHex(t, tc.frame)
+
+		// as FFmpeg writes AC-3 and E-AC-3: an empty sequence start, the multichannel config and the frames
+		prober := NewProber(0)
+		prober.PushMetadata(flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(tc.fourCC)})
+		require.True(t, prober.HasAudio, name)
+		require.NoError(t, prober.PushTag(exAudioTag(tc.fourCC, flvio.PKTTYPE_SEQUENCE_START, nil), 0), name)
+		require.NoError(t, prober.PushTag(exAudioTag(tc.fourCC, flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG, []byte{0x01, byte(tc.channels), 0x00, 0x00, 0x00, 0x3f}), 0), name)
+		require.False(t, prober.GotAudio, name)
+		require.False(t, prober.Probed(), name)
+		require.NoError(t, prober.PushTag(exAudioTag(tc.fourCC, flvio.PKTTYPE_CODED_FRAMES, frame), 32), name)
+		require.True(t, prober.Probed(), name)
+		require.Len(t, prober.Streams, 1, name)
+		stream := prober.Streams[0].(ac3parser.CodecData)
+		require.Equal(t, tc.typ, stream.Type(), name)
+		require.Equal(t, 48000, stream.SampleRate(), name)
+		require.Equal(t, tc.channels, stream.ChannelLayout().Count(), name)
+		require.Equal(t, av.Packet{Data: frame, IsKeyFrame: true, Time: 32}, prober.PopPacket(), name)
+		require.True(t, prober.Empty(), name)
+	}
+
+	// the frame doesn't match the FourCC
+	prober := NewProber(0)
+	require.Error(t, prober.PushTag(exAudioTag(flvio.FOURCC_AC3, flvio.PKTTYPE_CODED_FRAMES, decodeHex(t, eac3FrameStereo)), 0))
+	prober = NewProber(0)
+	require.Error(t, prober.PushTag(exAudioTag(flvio.FOURCC_EAC3, flvio.PKTTYPE_CODED_FRAMES, decodeHex(t, ac3FrameStereo)), 0))
+	// no syncframe
+	prober = NewProber(0)
+	require.Error(t, prober.PushTag(exAudioTag(flvio.FOURCC_AC3, flvio.PKTTYPE_CODED_FRAMES, []byte{0x00, 0x01, 0x02}), 0))
+}
+
+func TestProberPendingTrack(t *testing.T) {
+	// as FFmpeg writes a multitrack stream without TrackIdInfoMaps: the sequence starts of all tracks, then the
+	// frames. The E-AC-3 and Opus tracks (without an ID header) only get their stream with their first frame,
+	// which comes after the first frame of the default tracks.
+	eac3 := decodeHex(t, eac3FrameStereo)
+	for _, tc := range []struct {
+		fourCC [4]byte
+		frame  []byte
+		typ    av.CodecType
+	}{
+		{flvio.FOURCC_EAC3, eac3, av.EAC3},
+		{flvio.FOURCC_OPUS, []byte{0xfc, 0x01}, av.OPUS},
+	} {
+		name := string(tc.fourCC[:])
+		prober := NewProber(0)
+		prober.PushMetadata(flvio.AMFMap{"audiocodecid": float64(flvio.SOUND_AAC)})
+		require.NoError(t, prober.PushTag(aacTag(flvio.AAC_SEQHDR, []byte{0x12, 0x10}), 0), name)
+		require.NoError(t, prober.PushTag(trackTag(exAudioTag(tc.fourCC, flvio.PKTTYPE_SEQUENCE_START, nil), 1), 0), name)
+		require.NoError(t, prober.PushTag(aacTag(flvio.AAC_RAW, []byte{0xA0}), 0), name)
+		require.False(t, prober.Probed(), name)
+		require.NoError(t, prober.PushTag(trackTag(exAudioTag(tc.fourCC, flvio.PKTTYPE_CODED_FRAMES, tc.frame), 1), 0), name)
+		require.True(t, prober.Probed(), name)
+		require.Len(t, prober.Streams, 2, name)
+		require.Equal(t, av.AAC, prober.Streams[0].Type(), name)
+		require.Equal(t, tc.typ, prober.Streams[1].Type(), name)
+	}
+
+	// a pending track that never gets a frame ends probing after MaxProbePacketCount
+	prober := NewProber(0)
+	prober.MaxProbePacketCount = 4
+	prober.PushMetadata(flvio.AMFMap{"audiocodecid": float64(flvio.SOUND_AAC)})
+	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_SEQHDR, []byte{0x12, 0x10}), 0))
+	require.NoError(t, prober.PushTag(trackTag(exAudioTag(flvio.FOURCC_EAC3, flvio.PKTTYPE_SEQUENCE_START, nil), 1), 0))
+	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_RAW, []byte{0xA0}), 0))
+	require.False(t, prober.Probed())
+	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_RAW, []byte{0xA1}), 0))
+	require.True(t, prober.Probed())
+	require.Len(t, prober.Streams, 1)
+}
+
+func TestMuxDemuxAC3(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+	ac3, err := ac3parser.NewCodecDataFromFrame(decodeHex(t, ac3Frame51))
+	require.NoError(t, err)
+	eac3, err := ac3parser.NewCodecDataFromFrame(decodeHex(t, eac3FrameStereo))
+	require.NoError(t, err)
+
+	// AC-3 as the default track and E-AC-3 as track 1
+	streams := []av.CodecData{h264, ac3, eac3}
+	packets := []av.Packet{
+		{Idx: 0, IsKeyFrame: true, Data: []byte{0xA0}},
+		{Idx: 1, IsKeyFrame: true, Data: decodeHex(t, ac3Frame51)},
+		{Idx: 2, IsKeyFrame: true, Data: decodeHex(t, eac3FrameStereo)},
+		{Idx: 1, IsKeyFrame: true, Data: decodeHex(t, ac3Frame51), Time: 32},
+	}
+
+	buf := &bytes.Buffer{}
+	muxer := NewMuxer(buf)
+	require.NoError(t, muxer.WriteHeader(streams))
+	for _, pkt := range packets {
+		require.NoError(t, muxer.WritePacket(pkt))
+	}
+	require.NoError(t, muxer.WriteTrailer())
+
+	// an empty sequence start, as FFmpeg writes it
+	tag, ok, err := CodecDataToTag(eac3)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, tag.IsExHeader)
+	require.Equal(t, flvio.FOURCC_EAC3, tag.FourCC)
+	require.Equal(t, uint8(flvio.PKTTYPE_SEQUENCE_START), tag.PacketType)
+	require.Empty(t, tag.Data)
+
+	demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+	got, err := demuxer.Streams()
+	require.NoError(t, err)
+	require.Equal(t, streams, got)
+	for i, expected := range packets {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, expected, pkt, "packet %d", i)
+	}
+
+	metadata, err := NewMetadataByStreams(streams)
+	require.NoError(t, err)
+	require.Equal(t, flvio.FourCCToFloat(flvio.FOURCC_AC3), metadata["audiocodecid"])
+	require.Equal(t, 48000, metadata["audiosamplerate"])
+	require.Equal(t, flvio.AMFMap{"1": flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_EAC3), "samplerate": 48000, "channels": 2}}, metadata["audioTrackIdInfoMap"])
 }

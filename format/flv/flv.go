@@ -12,6 +12,7 @@ import (
 	"github.com/datarhei/joy4/av/avutil"
 	"github.com/datarhei/joy4/codec"
 	"github.com/datarhei/joy4/codec/aacparser"
+	"github.com/datarhei/joy4/codec/ac3parser"
 	"github.com/datarhei/joy4/codec/av1parser"
 	"github.com/datarhei/joy4/codec/flacparser"
 	"github.com/datarhei/joy4/codec/h264parser"
@@ -122,6 +123,12 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 			case av.FLAC:
 				metadata["audiocodecid"] = flvio.FourCCToFloat(flvio.FOURCC_FLAC)
 
+			case av.AC3:
+				metadata["audiocodecid"] = flvio.FourCCToFloat(flvio.FOURCC_AC3)
+
+			case av.EAC3:
+				metadata["audiocodecid"] = flvio.FourCCToFloat(flvio.FOURCC_EAC3)
+
 			default:
 				err = fmt.Errorf("flv: metadata: unsupported audio codecType=%v", stream.Type())
 				return
@@ -143,7 +150,7 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 
 // TrackIDs returns the track id (E-RTMP v2) of each stream: the n-th video stream has the track id n, the
 // n-th audio stream as well. Streams with a track id other than 0 are written as multitrack (OneTrack), so
-// their codec must have a FourCC (H.264, HEVC, VP9, AV1, VVC, AAC, Opus, FLAC), otherwise an error is returned. There
+// their codec must have a FourCC (H.264, HEVC, VP9, AV1, VVC, AAC, Opus, FLAC, AC-3, E-AC-3), otherwise an error is returned. There
 // are at most 256 tracks per media type.
 func TrackIDs(streams []av.CodecData) ([]uint8, error) {
 	trackIDs := make([]uint8, len(streams))
@@ -163,7 +170,7 @@ func TrackIDs(streams []av.CodecData) ([]uint8, error) {
 		}
 		if n != 0 {
 			switch stream.Type() {
-			case av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.AAC, av.OPUS, av.FLAC:
+			case av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.AAC, av.OPUS, av.FLAC, av.AC3, av.EAC3:
 			default:
 				return nil, fmt.Errorf("flv: codecType=%v can't be written as track %d", stream.Type(), n)
 			}
@@ -182,6 +189,10 @@ func audioFourCC(typ av.CodecType) ([4]byte, bool) {
 		return flvio.FOURCC_OPUS, true
 	case av.FLAC:
 		return flvio.FOURCC_FLAC, true
+	case av.AC3:
+		return flvio.FOURCC_AC3, true
+	case av.EAC3:
+		return flvio.FOURCC_EAC3, true
 	}
 	return [4]byte{}, false
 }
@@ -254,6 +265,10 @@ type Prober struct {
 	announcedVideoTracks map[uint8]bool
 	announcedAudioTracks map[uint8]bool
 	hasTrackInfo         bool
+
+	// the audio tracks with a sequence start or multichannel config, but without a stream yet, because the
+	// config is in the first frame (AC-3, E-AC-3, Opus without an ID header)
+	pendingAudioTracks map[uint8]bool
 
 	// whether a coded frame (of any track or codec) has been pushed
 	gotCodedFrame bool
@@ -362,6 +377,12 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 			}
 			if stream != nil {
 				prober.addTrack(tag, stream)
+			} else if tag.IsExHeader && tagCodecType(tag) != 0 && (tag.PacketType == flvio.PKTTYPE_SEQUENCE_START || tag.PacketType == flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG) {
+				// wait for its first frame
+				if prober.pendingAudioTracks == nil {
+					prober.pendingAudioTracks = map[uint8]bool{}
+				}
+				prober.pendingAudioTracks[tag.TrackID] = true
 			}
 		}
 		if isCodedFrame(tag) {
@@ -444,7 +465,7 @@ func videoCodecData(tag flvio.Tag) (av.CodecData, error) {
 }
 
 // audioCodecData returns the codec data of the first audio tag of a track that has the configuration: the
-// sequence start of AAC and FLAC, or any tag of Speex and Nellymoser. It is nil for other tags and unsupported codecs.
+// sequence start of AAC and FLAC, the first frame of AC-3 and E-AC-3, or any tag of Speex and Nellymoser. It is nil for other tags and unsupported codecs.
 func audioCodecData(tag flvio.Tag) (av.CodecData, error) {
 	switch tagCodecType(tag) {
 	case av.AAC:
@@ -462,6 +483,18 @@ func audioCodecData(tag flvio.Tag) (av.CodecData, error) {
 			stream, err := flacparser.NewCodecDataFromSequenceHeader(tag.Data)
 			if err != nil {
 				return nil, fmt.Errorf("flv: flac seqhdr invalid: %w", err)
+			}
+			return stream, nil
+		}
+	case av.AC3, av.EAC3:
+		// the sequence start has no config, it is in the header of each syncframe
+		if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES && len(tag.Data) != 0 {
+			stream, err := ac3parser.NewCodecDataFromFrame(tag.Data)
+			if err != nil {
+				return nil, fmt.Errorf("flv: %s: %w", string(tag.FourCC[:]), err)
+			}
+			if stream.Type() != tagCodecType(tag) {
+				return nil, fmt.Errorf("flv: %s: the frame is %v", string(tag.FourCC[:]), stream.Type())
 			}
 			return stream, nil
 		}
@@ -650,10 +683,12 @@ var supportedAudioFourCCs = [][4]byte{
 	flvio.FOURCC_AAC,
 	flvio.FOURCC_OPUS,
 	flvio.FOURCC_FLAC,
+	flvio.FOURCC_AC3,
+	flvio.FOURCC_EAC3,
 }
 
 // isSupportedAudioCodecID returns whether the audiocodecid of the metadata is a supported codec. It is a
-// legacy codec id, or the FourCC of AAC, Opus or FLAC as a number or a string (E-RTMP).
+// legacy codec id, or the FourCC of AAC, Opus, FLAC, AC-3 or E-AC-3 as a number or a string (E-RTMP).
 func isSupportedAudioCodecID(id interface{}) bool {
 	switch id := id.(type) {
 	case float64:
@@ -724,12 +759,15 @@ func (prober *Prober) Probed() (ok bool) {
 		prober.MaxProbePacketCount = MaxProbePacketCount
 	}
 
-	if prober.HasAudio || prober.HasVideo || len(prober.announcedVideoTracks) != 0 || len(prober.announcedAudioTracks) != 0 {
+	if prober.HasAudio || prober.HasVideo || len(prober.announcedVideoTracks) != 0 || len(prober.announcedAudioTracks) != 0 || len(prober.pendingAudioTracks) != 0 {
 		complete := prober.HasVideo == (prober.videoTracks[0] != nil) && prober.HasAudio == (prober.audioTracks[0] != nil)
 		for id := range prober.announcedVideoTracks {
 			complete = complete && prober.videoTracks[id] != nil
 		}
 		for id := range prober.announcedAudioTracks {
+			complete = complete && prober.audioTracks[id] != nil
+		}
+		for id := range prober.pendingAudioTracks {
 			complete = complete && prober.audioTracks[id] != nil
 		}
 		if complete && (prober.hasTrackInfo || prober.gotCodedFrame) {
@@ -823,6 +861,10 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 				return av.OPUS
 			case flvio.FOURCC_FLAC:
 				return av.FLAC
+			case flvio.FOURCC_AC3:
+				return av.AC3
+			case flvio.FOURCC_EAC3:
+				return av.EAC3
 			}
 			return 0
 		}
@@ -1155,6 +1197,18 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 		}
 		ok = true
 
+	case av.AC3, av.EAC3:
+		// an empty sequence start, as FFmpeg writes it, the config is in each syncframe
+		fourCC, _ := audioFourCC(stream.Type())
+		_tag = flvio.Tag{
+			Type:        flvio.TAG_AUDIO,
+			SoundFormat: flvio.SOUND_EXHEADER,
+			IsExHeader:  true,
+			PacketType:  flvio.PKTTYPE_SEQUENCE_START,
+			FourCC:      fourCC,
+		}
+		ok = true
+
 	case av.AAC:
 		aac := stream.(aacparser.CodecData)
 		// the FLV spec requires 44 kHz and stereo for AAC, the actual sample rate and
@@ -1309,7 +1363,7 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 			Data:          pkt.Data,
 		}
 
-	case av.OPUS, av.FLAC:
+	case av.OPUS, av.FLAC, av.AC3, av.EAC3:
 		fourCC, _ := audioFourCC(stream.Type())
 		tag = flvio.Tag{
 			Type:        flvio.TAG_AUDIO,

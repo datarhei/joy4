@@ -127,6 +127,8 @@ var (
 	NELLYMOSER = MakeAudioCodecType(avCodecTypeMagic + 5)
 	OPUS       = MakeAudioCodecType(avCodecTypeMagic + 6)
 	FLAC       = MakeAudioCodecType(avCodecTypeMagic + 7)
+	AC3        = MakeAudioCodecType(avCodecTypeMagic + 8)
+	EAC3       = MakeAudioCodecType(avCodecTypeMagic + 9)
 )
 
 const codecTypeAudioBit = 0x1
@@ -158,6 +160,10 @@ func (c CodecType) String() string {
 		return "OPUS"
 	case FLAC:
 		return "FLAC"
+	case AC3:
+		return "AC3"
+	case EAC3:
+		return "EAC3"
 	}
 	return ""
 }
