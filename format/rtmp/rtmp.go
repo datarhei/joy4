@@ -924,7 +924,7 @@ var CodecTypes = flv.CodecTypes
 var videoFourCCs = [][4]byte{flvio.FOURCC_AV1, flvio.FOURCC_VP9, flvio.FOURCC_HEVC, flvio.FOURCC_VVC}
 
 // audioFourCCs are the FourCCs of the supported E-RTMP audio codecs (E-RTMP v2).
-var audioFourCCs = [][4]byte{flvio.FOURCC_AAC}
+var audioFourCCs = [][4]byte{flvio.FOURCC_AAC, flvio.FOURCC_OPUS}
 
 // The flags of capsEx (E-RTMP v2, CapsExMask) that joy4 supports: multitrack and ModEx. The nano offset
 // of ModEx is parsed but not applied, reconnect is not supported.

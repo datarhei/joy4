@@ -12,6 +12,7 @@ import (
 	"github.com/datarhei/joy4/codec/fake"
 	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/codec/hevcparser"
+	"github.com/datarhei/joy4/codec/opusparser"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/stretchr/testify/require"
@@ -477,7 +478,9 @@ func TestProberPushMetadata(t *testing.T) {
 		{flvio.AMFMap{"videocodecid": 2.0, "audiocodecid": 2.0}, false, false},
 		{flvio.AMFMap{"videocodecid": 4.0, "audiocodecid": 1.0}, false, false},
 		{flvio.AMFMap{"videocodecid": "VP62", "audiocodecid": ".mp3"}, false, false},
-		{flvio.AMFMap{"audiocodecid": "Opus"}, false, false},
+		{flvio.AMFMap{"audiocodecid": "Opus"}, false, true},
+		{flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_OPUS)}, false, true},
+		{flvio.AMFMap{"audiocodecid": "abcd"}, false, false},
 		{flvio.AMFMap{"videocodecid": nil, "audiocodecid": true}, false, false},
 	}
 
@@ -768,18 +771,21 @@ func TestProberExAudioAAC(t *testing.T) {
 	}
 }
 
+// unknownFourCC is the FourCC of a codec that isn't supported.
+var unknownFourCC = [4]byte{'a', 'b', 'c', 'd'}
+
 func TestProberExAudioUnsupportedCodec(t *testing.T) {
-	// Opus isn't supported: the metadata doesn't enable audio and its frames are dropped
+	// an unknown codec isn't supported: the metadata doesn't enable audio and its frames are dropped
 	prober := NewProber(0)
 	prober.PushMetadata(flvio.AMFMap{
 		"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_VVC),
-		"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_OPUS),
+		"audiocodecid": flvio.FourCCToFloat(unknownFourCC),
 	})
 	require.True(t, prober.HasVideo)
 	require.False(t, prober.HasAudio)
 
-	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_SEQUENCE_START, []byte("OpusHead")), 0))
-	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_CODED_FRAMES, []byte{0xA0}), 0))
+	require.NoError(t, prober.PushTag(exAudioTag(unknownFourCC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x01}), 0))
+	require.NoError(t, prober.PushTag(exAudioTag(unknownFourCC, flvio.PKTTYPE_CODED_FRAMES, []byte{0xA0}), 0))
 	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_VVC, flvio.PKTTYPE_SEQUENCE_START, []byte{0x01}), 0))
 	require.True(t, prober.Probed())
 	require.Len(t, prober.Streams, 1)
@@ -1084,4 +1090,102 @@ func TestMetadataTracks(t *testing.T) {
 	require.True(t, prober.HasAudio)
 	require.Equal(t, map[uint8]bool{1: true}, prober.announcedVideoTracks)
 	require.Equal(t, map[uint8]bool{1: true}, prober.announcedAudioTracks)
+}
+
+// the ID header of FFmpeg (libopus) for 5.1
+const opusHead51 = "4f707573486561640106380180bb00000000010402000401020305"
+
+func TestProberOpus(t *testing.T) {
+	// as FFmpeg writes 5.1 Opus: the ID header, the multichannel config and the frames
+	prober := NewProber(0)
+	prober.PushMetadata(flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_OPUS)})
+	require.True(t, prober.HasAudio)
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_SEQUENCE_START, decodeHex(t, opusHead51)), 0))
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_OPUS, flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG, []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x3f}), 0))
+	require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_CODED_FRAMES, []byte{0xfc, 0xfc, 0x37}), 0))
+	require.True(t, prober.Probed())
+	require.Len(t, prober.Streams, 1)
+	stream := prober.Streams[0].(opusparser.CodecData)
+	require.Equal(t, 6, stream.ChannelLayout().Count())
+	require.Equal(t, 48000, stream.SampleRate())
+	require.Equal(t, decodeHex(t, opusHead51), stream.OpusHeadBytes())
+	duration, err := stream.PacketDuration([]byte{0xfc, 0xfc, 0x37})
+	require.NoError(t, err)
+	require.Equal(t, 20*time.Millisecond, duration)
+
+	require.False(t, prober.Empty())
+	require.Equal(t, av.Packet{Data: []byte{0xfc, 0xfc, 0x37}, IsKeyFrame: true}, prober.PopPacket())
+	require.True(t, prober.Empty())
+
+	// without an ID header, the channels are taken from the multichannel config, or the first packet
+	for _, tc := range []struct {
+		name   string
+		tag    flvio.Tag
+		layout av.ChannelLayout
+	}{
+		{"multichannel config", exAudioTag(flvio.FOURCC_OPUS, flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG, []byte{0x01, 0x02, 0x00, 0x00, 0x00, 0x03}), av.CH_STEREO},
+		{"stereo packet", exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_CODED_FRAMES, []byte{0xfc, 0x00}), av.CH_STEREO},
+		{"mono packet", exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_CODED_FRAMES, []byte{0xf8, 0x00}), av.CH_MONO},
+	} {
+		prober := NewProber(0)
+		prober.HasAudio = true
+		require.NoError(t, prober.PushTag(exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_SEQUENCE_START, nil), 0), tc.name)
+		require.False(t, prober.GotAudio, tc.name)
+		require.NoError(t, prober.PushTag(tc.tag, 0), tc.name)
+		pushCodedFrame(t, prober)
+		require.True(t, prober.Probed(), tc.name)
+		require.Len(t, prober.Streams, 1, tc.name)
+		require.Equal(t, tc.layout, prober.Streams[0].(av.AudioCodecData).ChannelLayout(), tc.name)
+		require.Nil(t, prober.Streams[0].(opusparser.CodecData).Header, tc.name)
+	}
+
+	// an invalid ID header
+	prober = NewProber(0)
+	require.Error(t, prober.PushTag(exAudioTag(flvio.FOURCC_OPUS, flvio.PKTTYPE_SEQUENCE_START, []byte("OpusHead")), 0))
+}
+
+func TestMuxDemuxOpus(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+	opus51, err := opusparser.NewCodecDataFromOpusHead(decodeHex(t, opusHead51))
+	require.NoError(t, err)
+	opusStereo, err := opusparser.NewCodecData(2)
+	require.NoError(t, err)
+
+	// Opus as the default track and as track 1 (without an ID header)
+	streams := []av.CodecData{h264, opus51, opusStereo}
+	packets := []av.Packet{
+		{Idx: 0, IsKeyFrame: true, Data: []byte{0xA0}},
+		{Idx: 1, IsKeyFrame: true, Data: []byte{0xfc, 0xfc, 0x37}},
+		{Idx: 2, IsKeyFrame: true, Data: []byte{0xfc, 0x01}},
+		{Idx: 1, IsKeyFrame: true, Data: []byte{0xfc, 0xfd, 0x0e}, Time: 20},
+	}
+
+	buf := &bytes.Buffer{}
+	muxer := NewMuxer(buf)
+	require.NoError(t, muxer.WriteHeader(streams))
+	for _, pkt := range packets {
+		require.NoError(t, muxer.WritePacket(pkt))
+	}
+	require.NoError(t, muxer.WriteTrailer())
+
+	// the stream without an ID header is written with a minimal one
+	opusStereoHead, err := opusparser.NewCodecDataFromOpusHead(opusStereo.OpusHeadBytes())
+	require.NoError(t, err)
+
+	demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+	got, err := demuxer.Streams()
+	require.NoError(t, err)
+	require.Equal(t, []av.CodecData{h264, opus51, opusStereoHead}, got)
+	for i, expected := range packets {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, expected, pkt, "packet %d", i)
+	}
+
+	metadata, err := NewMetadataByStreams(streams)
+	require.NoError(t, err)
+	require.Equal(t, flvio.FourCCToFloat(flvio.FOURCC_OPUS), metadata["audiocodecid"])
+	require.Equal(t, 48000, metadata["audiosamplerate"])
+	require.Equal(t, flvio.AMFMap{"1": flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_OPUS), "samplerate": 48000, "channels": 2}}, metadata["audioTrackIdInfoMap"])
 }

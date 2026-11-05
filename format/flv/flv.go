@@ -15,6 +15,7 @@ import (
 	"github.com/datarhei/joy4/codec/av1parser"
 	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/codec/hevcparser"
+	"github.com/datarhei/joy4/codec/opusparser"
 	"github.com/datarhei/joy4/codec/vp9parser"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
@@ -94,8 +95,9 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 			stream := _stream.(av.AudioCodecData)
 			if trackID != 0 {
 				// only codecs with a FourCC (see TrackIDs)
+				fourCC, _ := audioFourCC(typ)
 				info := flvio.AMFMap{
-					"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_AAC),
+					"audiocodecid": flvio.FourCCToFloat(fourCC),
 					"samplerate":   stream.SampleRate(),
 					"channels":     stream.ChannelLayout().Count(),
 				}
@@ -112,6 +114,9 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 
 			case av.NELLYMOSER:
 				metadata["audiocodecid"] = int(nellymoserTag(stream).SoundFormat)
+
+			case av.OPUS:
+				metadata["audiocodecid"] = flvio.FourCCToFloat(flvio.FOURCC_OPUS)
 
 			default:
 				err = fmt.Errorf("flv: metadata: unsupported audio codecType=%v", stream.Type())
@@ -154,7 +159,7 @@ func TrackIDs(streams []av.CodecData) ([]uint8, error) {
 		}
 		if n != 0 {
 			switch stream.Type() {
-			case av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.AAC:
+			case av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.AAC, av.OPUS:
 			default:
 				return nil, fmt.Errorf("flv: codecType=%v can't be written as track %d", stream.Type(), n)
 			}
@@ -162,6 +167,17 @@ func TrackIDs(streams []av.CodecData) ([]uint8, error) {
 		trackIDs[i] = uint8(n)
 	}
 	return trackIDs, nil
+}
+
+// audioFourCC returns the FourCC of the ExAudioTagHeader (E-RTMP v2) of an audio codec.
+func audioFourCC(typ av.CodecType) ([4]byte, bool) {
+	switch typ {
+	case av.AAC:
+		return flvio.FOURCC_AAC, true
+	case av.OPUS:
+		return flvio.FOURCC_OPUS, true
+	}
+	return [4]byte{}, false
 }
 
 // TrackTag returns the tag as a tag of the track (E-RTMP v2 multitrack, OneTrack). The tag of the track 0 is
@@ -433,11 +449,51 @@ func audioCodecData(tag flvio.Tag) (av.CodecData, error) {
 			}
 			return stream, nil
 		}
+	case av.OPUS:
+		return opusCodecData(tag)
 	case av.SPEEX:
 		return codec.NewSpeexCodecData(16000, tag.ChannelLayout()), nil
 	case av.NELLYMOSER:
 		sampleRate, channelLayout := nellymoserFormat(tag)
 		return codec.NewNellymoserCodecData(sampleRate, channelLayout), nil
+	}
+	return nil, nil
+}
+
+// opusCodecData returns the codec data of an Opus stream from its ID header (SequenceStart), or, without
+// one, from the channel count of a MultichannelConfig or the stereo flag of the first packet (E-RTMP v2).
+// It is nil for an empty SequenceStart, the next tag has the channels.
+func opusCodecData(tag flvio.Tag) (av.CodecData, error) {
+	switch tag.PacketType {
+	case flvio.PKTTYPE_SEQUENCE_START:
+		if len(tag.Data) == 0 {
+			return nil, nil
+		}
+		stream, err := opusparser.NewCodecDataFromOpusHead(tag.Data)
+		if err != nil {
+			return nil, fmt.Errorf("flv: opus seqhdr invalid: %w", err)
+		}
+		return stream, nil
+	case flvio.AUDIO_PKTTYPE_MULTICHANNEL_CONFIG:
+		config, err := flvio.ParseMultichannelConfig(tag.Data)
+		if err != nil {
+			return nil, fmt.Errorf("flv: opus: %w", err)
+		}
+		stream, err := opusparser.NewCodecData(int(config.ChannelCount))
+		if err != nil {
+			return nil, fmt.Errorf("flv: opus: %w", err)
+		}
+		return stream, nil
+	case flvio.PKTTYPE_CODED_FRAMES:
+		channels := 1
+		if opusparser.IsStereo(tag.Data) {
+			channels = 2
+		}
+		stream, err := opusparser.NewCodecData(channels)
+		if err != nil {
+			return nil, fmt.Errorf("flv: opus: %w", err)
+		}
+		return stream, nil
 	}
 	return nil, nil
 }
@@ -576,8 +632,13 @@ func isSupportedVideoCodecID(id interface{}) bool {
 	return false
 }
 
+var supportedAudioFourCCs = [][4]byte{
+	flvio.FOURCC_AAC,
+	flvio.FOURCC_OPUS,
+}
+
 // isSupportedAudioCodecID returns whether the audiocodecid of the metadata is a supported codec. It is a
-// legacy codec id, or "mp4a" for AAC.
+// legacy codec id, or the FourCC of AAC or Opus as a number or a string (E-RTMP).
 func isSupportedAudioCodecID(id interface{}) bool {
 	switch id := id.(type) {
 	case float64:
@@ -585,11 +646,17 @@ func isSupportedAudioCodecID(id interface{}) bool {
 		case flvio.SOUND_AAC, flvio.SOUND_SPEEX, flvio.SOUND_NELLYMOSER, flvio.SOUND_NELLYMOSER_16KHZ_MONO, flvio.SOUND_NELLYMOSER_8KHZ_MONO:
 			return true
 		}
-		if id == flvio.FourCCToFloat(flvio.FOURCC_AAC) {
-			return true
+		for _, fourCC := range supportedAudioFourCCs {
+			if id == flvio.FourCCToFloat(fourCC) {
+				return true
+			}
 		}
 	case string:
-		return id == string(flvio.FOURCC_AAC[:])
+		for _, fourCC := range supportedAudioFourCCs {
+			if id == string(fourCC[:]) {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -734,8 +801,11 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 
 	case flvio.TAG_AUDIO:
 		if tag.IsExHeader {
-			if tag.FourCC == flvio.FOURCC_AAC {
+			switch tag.FourCC {
+			case flvio.FOURCC_AAC:
 				return av.AAC
+			case flvio.FOURCC_OPUS:
+				return av.OPUS
 			}
 			return 0
 		}
@@ -1042,6 +1112,18 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 	case av.NELLYMOSER:
 	case av.SPEEX:
 
+	case av.OPUS:
+		// the ID header, or a minimal one for a stream without one
+		_tag = flvio.Tag{
+			Type:        flvio.TAG_AUDIO,
+			SoundFormat: flvio.SOUND_EXHEADER,
+			IsExHeader:  true,
+			PacketType:  flvio.PKTTYPE_SEQUENCE_START,
+			FourCC:      flvio.FOURCC_OPUS,
+			Data:        stream.(opusparser.CodecData).OpusHeadBytes(),
+		}
+		ok = true
+
 	case av.AAC:
 		aac := stream.(aacparser.CodecData)
 		// the FLV spec requires 44 kHz and stereo for AAC, the actual sample rate and
@@ -1194,6 +1276,16 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 			SoundType:     flvio.SOUND_STEREO,
 			AACPacketType: flvio.AAC_RAW,
 			Data:          pkt.Data,
+		}
+
+	case av.OPUS:
+		tag = flvio.Tag{
+			Type:        flvio.TAG_AUDIO,
+			SoundFormat: flvio.SOUND_EXHEADER,
+			IsExHeader:  true,
+			PacketType:  flvio.PKTTYPE_CODED_FRAMES,
+			FourCC:      flvio.FOURCC_OPUS,
+			Data:        pkt.Data,
 		}
 
 	case av.SPEEX:
