@@ -3095,3 +3095,43 @@ func TestReadMidStreamSequenceHeader(t *testing.T) {
 		require.Equal(t, expected, pkt.Data, "packet %d", i)
 	}
 }
+
+func TestReadModEx(t *testing.T) {
+	// VVC with a TimestampOffsetNano (ModEx) in front of the sequence start and the coded frames
+	vvc := func(packetType byte, data ...byte) []byte {
+		b := []byte{0x80 | flvio.FRAME_KEY<<4 | flvio.PKTTYPE_MODEX, 0x02, 0x07, 0xA1, 0x20, flvio.MODEX_TIMESTAMP_OFFSET_NANO<<4 | packetType, 'v', 'v', 'c', '1'}
+		return append(b, data...)
+	}
+	video := func(timestamp uint32, payload []byte) []byte {
+		return chunkMessage(6, timestamp, msgtypeidVideoMsg, 1, payload, 128)
+	}
+
+	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"})
+	data = append(data, commandMessage("createStream", 2.0, nil)...)
+	data = append(data, commandMessage("publish", 3.0, nil, "test", "live")...)
+	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_VVC)})...)
+	data = concat(data,
+		video(0, vvc(flvio.PKTTYPE_SEQUENCE_START, 0x01)),
+		video(0, vvc(flvio.PKTTYPE_CODED_FRAMES, 0x00, 0x00, 0x28, 0xA0)),
+		video(40, vvc(flvio.PKTTYPE_CODED_FRAMESX, 0xA1)),
+	)
+
+	conn := newReadConn(data)
+	conn.isserver = true
+	conn.stage = stageHandshakeDone
+
+	streams, err := conn.Streams()
+	require.NoError(t, err)
+	require.Len(t, streams, 1)
+	require.Equal(t, av.VVC, streams[0].Type())
+
+	pkt, err := conn.ReadPacket()
+	require.NoError(t, err)
+	require.Equal(t, []byte{0xA0}, pkt.Data)
+	require.Equal(t, int64(40), pkt.CompositionTime)
+
+	pkt, err = conn.ReadPacket()
+	require.NoError(t, err)
+	require.Equal(t, []byte{0xA1}, pkt.Data)
+	require.Equal(t, int64(40), pkt.Time)
+}

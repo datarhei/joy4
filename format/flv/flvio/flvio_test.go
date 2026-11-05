@@ -263,3 +263,73 @@ func TestVideoParseHeaderCommandFrame(t *testing.T) {
 	require.Equal(t, 1, n)
 	require.Equal(t, uint8(FRAME_COMMAND), tag.FrameType)
 }
+
+func TestVideoParseHeaderModEx(t *testing.T) {
+	// HEVC CodedFrames with a TimestampOffsetNano of 500000 ns: ExHeader keyframe with PacketTypeModEx,
+	// size 3 (UI8 + 1), the offset (UI24), ModEx type 0 and the packet type CodedFrames, the FourCC and
+	// the composition time
+	b := []byte{0x97, 0x02, 0x07, 0xA1, 0x20, 0x01, 'h', 'v', 'c', '1', 0x00, 0x00, 0x28, 0xAA}
+	tag := Tag{Type: TAG_VIDEO}
+	n, err := tag.ParseHeader(b)
+	require.NoError(t, err)
+	require.Equal(t, len(b)-1, n)
+	require.True(t, tag.IsExHeader)
+	require.Equal(t, uint8(FRAME_KEY), tag.FrameType)
+	require.Equal(t, uint8(PKTTYPE_CODED_FRAMES), tag.PacketType)
+	require.Equal(t, FOURCC_HEVC, tag.FourCC)
+	require.Equal(t, int64(40), tag.CompositionTime)
+	require.Equal(t, uint32(500000), tag.TimestampNanoOffset)
+
+	// every truncation is an error
+	for i := 1; i < n; i++ {
+		tag := Tag{Type: TAG_VIDEO}
+		_, err := tag.ParseHeader(b[:i])
+		require.Error(t, err, "%d bytes", i)
+	}
+
+	// it isn't written
+	w := make([]byte, MaxTagSubHeaderLength)
+	require.Equal(t, []byte{0x91, 'h', 'v', 'c', '1', 0x00, 0x00, 0x28}, w[:tag.FillHeader(w)])
+}
+
+func TestVideoParseHeaderModExSizes(t *testing.T) {
+	// a 16 bit size: UI8 255 (256), then UI16 299 (300 bytes), an unknown ModEx type 5, followed by a
+	// TimestampOffsetNano of 1000 ns with a 4 byte data (only the first 3 bytes are used)
+	b := []byte{0x97, 0xFF, 0x01, 0x2B}
+	b = append(b, make([]byte, 300)...)
+	b = append(b, 0x57, 0x03, 0x00, 0x03, 0xE8, 0xFF, 0x00, 'a', 'v', '0', '1', 0xAA)
+	tag := Tag{Type: TAG_VIDEO}
+	n, err := tag.ParseHeader(b)
+	require.NoError(t, err)
+	require.Equal(t, len(b)-1, n)
+	require.Equal(t, uint8(PKTTYPE_SEQUENCE_START), tag.PacketType)
+	require.Equal(t, FOURCC_AV1, tag.FourCC)
+	require.Equal(t, uint32(1000), tag.TimestampNanoOffset)
+
+	// a TimestampOffsetNano with less than 3 bytes is ignored
+	tag = Tag{Type: TAG_VIDEO}
+	n, err = tag.ParseHeader([]byte{0x97, 0x01, 0x03, 0xE8, 0x03, 'a', 'v', '0', '1', 0xAA})
+	require.NoError(t, err)
+	require.Equal(t, 9, n)
+	require.Equal(t, uint8(PKTTYPE_CODED_FRAMESX), tag.PacketType)
+	require.Equal(t, uint32(0), tag.TimestampNanoOffset)
+}
+
+func TestVideoParseHeaderModExMetadataCommand(t *testing.T) {
+	// the frame type of metadata after ModEx is kept (it is to be ignored)
+	tag := Tag{Type: TAG_VIDEO}
+	n, err := tag.ParseHeader([]byte{0xD7, 0x02, 0x00, 0x00, 0x01, 0x04, 'v', 'v', 'c', '1', 0xAA})
+	require.NoError(t, err)
+	require.Equal(t, 10, n)
+	require.Equal(t, uint8(PKTTYPE_METADATA), tag.PacketType)
+	require.Equal(t, uint8(0b1101), tag.FrameType)
+	require.Equal(t, FOURCC_VVC, tag.FourCC)
+
+	// a command frame after ModEx has the command instead of a FourCC
+	tag = Tag{Type: TAG_VIDEO}
+	n, err = tag.ParseHeader([]byte{0xD7, 0x02, 0x00, 0x00, 0x01, 0x01, 0x01})
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+	require.Equal(t, uint8(FRAME_COMMAND), tag.FrameType)
+	require.Equal(t, uint8(PKTTYPE_CODED_FRAMES), tag.PacketType)
+}

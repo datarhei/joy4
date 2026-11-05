@@ -68,6 +68,13 @@ const (
 	PKTTYPE_CODED_FRAMESX          = 3
 	PKTTYPE_METADATA               = 4
 	PKTTYPE_MPEG2TS_SEQUENCE_START = 5
+	PKTTYPE_MULTITRACK             = 6
+	PKTTYPE_MODEX                  = 7
+)
+
+// The types of ModEx data (E-RTMP v2, VideoPacketModExType and AudioPacketModExType).
+const (
+	MODEX_TIMESTAMP_OFFSET_NANO = 0
 )
 
 var (
@@ -183,8 +190,16 @@ type Tag struct {
 		3: PacketTypeCodedFramesX
 		4: PacketTypeMetadata
 		5: PacketTypeMPEG2TSSequenceStart
+		6: PacketTypeMultitrack
+		7: PacketTypeModEx (only while parsing, the packet type after the ModEx data is stored)
 	*/
 	PacketType uint8
+
+	/*
+		The nanosecond offset to the timestamp of the packet from a ModEx TimestampOffsetNano (E-RTMP v2),
+		0..999999. It is not written.
+	*/
+	TimestampNanoOffset uint32
 
 	/*
 		0: AVC sequence header
@@ -252,6 +267,43 @@ func (t Tag) audioFillHeader(b []byte) (n int) {
 	return
 }
 
+// parseModEx parses the ModEx data (E-RTMP v2) after the packet type, if the packet type is ModEx, and sets
+// the packet type that follows it. The data of a TimestampOffsetNano is stored in TimestampNanoOffset, the
+// data of other types is skipped.
+func (t *Tag) parseModEx(b []byte, n int) (int, error) {
+	for t.PacketType == PKTTYPE_MODEX {
+		if len(b) < n+1 {
+			return n, fmt.Errorf("parse invalid: not enough bytes for the ModEx data size")
+		}
+		size := int(b[n]) + 1
+		n++
+		if size == 256 {
+			if len(b) < n+2 {
+				return n, fmt.Errorf("parse invalid: not enough bytes for the ModEx data size")
+			}
+			size = int(pio.U16BE(b[n:])) + 1
+			n += 2
+		}
+
+		// the data and the byte with the ModEx type and the next packet type
+		if len(b) < n+size+1 {
+			return n, fmt.Errorf("parse invalid: not enough bytes for the ModEx data")
+		}
+		data := b[n : n+size]
+		n += size
+
+		modExType := b[n] >> 4
+		t.PacketType = b[n] & 0x0f
+		n++
+
+		if modExType == MODEX_TIMESTAMP_OFFSET_NANO && len(data) >= 3 {
+			t.TimestampNanoOffset = pio.U24BE(data)
+		}
+	}
+
+	return n, nil
+}
+
 func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 	if len(b) < n+1 {
 		err = fmt.Errorf("videodata: parse invalid")
@@ -268,6 +320,11 @@ func (t *Tag) videoParseHeader(b []byte) (n int, err error) {
 		t.IsExHeader = true
 		t.PacketType = t.CodecID
 		t.CodecID = 0
+
+		if n, err = t.parseModEx(b, n); err != nil {
+			err = fmt.Errorf("videodata: %w", err)
+			return
+		}
 
 		// the frame type is to be ignored for metadata (E-RTMP v1)
 		if t.PacketType != PKTTYPE_METADATA {
