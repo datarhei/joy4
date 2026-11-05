@@ -129,6 +129,7 @@ var (
 	FLAC       = MakeAudioCodecType(avCodecTypeMagic + 7)
 	AC3        = MakeAudioCodecType(avCodecTypeMagic + 8)
 	EAC3       = MakeAudioCodecType(avCodecTypeMagic + 9)
+	MP3        = MakeAudioCodecType(avCodecTypeMagic + 10)
 )
 
 const codecTypeAudioBit = 0x1
@@ -164,6 +165,8 @@ func (c CodecType) String() string {
 		return "AC3"
 	case EAC3:
 		return "EAC3"
+	case MP3:
+		return "MP3"
 	}
 	return ""
 }

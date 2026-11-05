@@ -34,6 +34,7 @@ const (
 	SOUND_EXHEADER              = 9 // ExAudioTagHeader (E-RTMP v2)
 	SOUND_AAC                   = 10
 	SOUND_SPEEX                 = 11
+	SOUND_MP3_8KHZ              = 14
 
 	SOUND_5_5Khz = 0
 	SOUND_11Khz  = 1
