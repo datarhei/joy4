@@ -562,7 +562,7 @@ func (record *HEVCDecoderConfRecord) Unmarshal(b []byte) (n int, err error) {
 	record.HEVCProfileIndication = b[1]
 	record.ProfileCompatibility = b[2]
 	record.HEVCLevelIndication = b[3]
-	record.LengthSizeMinusOne = b[4] & 0x03
+	record.LengthSizeMinusOne = b[21] & 0x03
 
 	vpscount := int(b[25] & 0x1f)
 	n += 26

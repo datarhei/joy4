@@ -2,6 +2,7 @@ package flv
 
 import (
 	"bytes"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/datarhei/joy4/codec"
 	"github.com/datarhei/joy4/codec/aacparser"
 	"github.com/datarhei/joy4/codec/fake"
+	"github.com/datarhei/joy4/codec/h264parser"
+	"github.com/datarhei/joy4/codec/hevcparser"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/stretchr/testify/require"
@@ -526,5 +529,182 @@ func TestAACTagFlags(t *testing.T) {
 		require.Len(t, streams, 1)
 		require.Equal(t, int(channels), streams[0].(av.AudioCodecData).ChannelLayout().Count())
 		require.Equal(t, 48000, streams[0].(av.AudioCodecData).SampleRate())
+	}
+}
+
+// H.264 config records of FFmpeg (libx264) with 320x240 and 640x360
+const (
+	avcRecord320x240 = "01f4000dffe1001867f4000d91968141fb011000000300100000030320f142aa01000568ce0f1920fff8f800"
+	avcRecord640x360 = "01f4001effe1001967f4001e919680a02ff89c0440000003004000000c83c58ba801000568ce0f1920fff8f800"
+)
+
+// HEVC parameter sets of FFmpeg (libx265) with 320x240 and 640x360: VPS, SPS, PPS
+var (
+	hevcParamSets320x240 = []string{
+		"40010c01ffff0408000003009e0800000300003c959409",
+		"4201010408000003009e0800000300003c90014101e2cb2b2a5261780b7020200040000003004000000642",
+		"4401c07318301890",
+	}
+	hevcParamSets640x360 = []string{
+		"40010c01ffff0408000003009e0800000300003f959409",
+		"4201010408000003009e0800000300003f9000a0402e3e272caca94985e02dc08080010000030001000003001908",
+		"4401c07318301890",
+	}
+)
+
+func decodeHex(t *testing.T, s string) []byte {
+	b, err := hex.DecodeString(s)
+	require.NoError(t, err)
+	return b
+}
+
+func hevcRecord(t *testing.T, paramSets []string) []byte {
+	codecData, err := hevcparser.NewCodecDataFromVPSAndSPSAndPPS(decodeHex(t, paramSets[0]), decodeHex(t, paramSets[1]), decodeHex(t, paramSets[2]))
+	require.NoError(t, err)
+	return codecData.HEVCDecoderConfRecordBytes()
+}
+
+// avcTag returns a legacy H.264 tag as flvio parses it.
+func avcTag(avcPacketType uint8, frameType uint8, data []byte) flvio.Tag {
+	tag := flvio.Tag{Type: flvio.TAG_VIDEO, CodecID: flvio.VIDEO_H264, FrameType: frameType, AVCPacketType: avcPacketType, Data: data}
+	if avcPacketType == flvio.AVC_SEQHDR {
+		tag.PacketType = flvio.PKTTYPE_SEQUENCE_START
+	} else {
+		tag.PacketType = flvio.PKTTYPE_CODED_FRAMES
+	}
+	return tag
+}
+
+// withParamSets returns the frame with the length-prefixed (4 bytes) NALUs in front of it.
+func withParamSets(frame []byte, nalus ...[]byte) []byte {
+	var b []byte
+	for _, nalu := range nalus {
+		b = append(b, byte(len(nalu)>>24), byte(len(nalu)>>16), byte(len(nalu)>>8), byte(len(nalu)))
+		b = append(b, nalu...)
+	}
+	return append(b, frame...)
+}
+
+func TestProberMidStreamSequenceHeaderH264(t *testing.T) {
+	recordA := decodeHex(t, avcRecord320x240)
+	recordB := decodeHex(t, avcRecord640x360)
+	codecDataB, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(recordB)
+	require.NoError(t, err)
+
+	keyFrame := []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x88}
+	interFrame := []byte{0x00, 0x00, 0x00, 0x02, 0x41, 0x9a}
+
+	prober := NewProber(0)
+	prober.HasVideo = true
+	require.NoError(t, prober.PushTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordA), 0))
+	require.True(t, prober.Probed())
+	require.Len(t, prober.Streams, 1)
+
+	frame := func(frameType uint8, data []byte) []byte {
+		pkt, ok := prober.TagToPacket(avcTag(flvio.AVC_NALU, frameType, data), 0)
+		require.True(t, ok)
+		return pkt.Data
+	}
+	seqhdr := func(record []byte) {
+		_, ok := prober.TagToPacket(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, record), 0)
+		require.False(t, ok)
+	}
+
+	require.Equal(t, keyFrame, frame(flvio.FRAME_KEY, keyFrame))
+
+	// a re-sent, identical config changes nothing
+	seqhdr(append([]byte(nil), recordA...))
+	require.Equal(t, keyFrame, frame(flvio.FRAME_KEY, keyFrame))
+
+	// a new config is put in front of every following key frame, not in front of inter frames
+	seqhdr(recordB)
+	expected := withParamSets(keyFrame, codecDataB.SPS(), codecDataB.PPS())
+	require.Equal(t, expected, frame(flvio.FRAME_KEY, keyFrame))
+	require.Equal(t, interFrame, frame(flvio.FRAME_INTER, interFrame))
+	require.Equal(t, expected, frame(flvio.FRAME_KEY, keyFrame))
+
+	// a re-sent new config doesn't change that
+	seqhdr(append([]byte(nil), recordB...))
+	require.Equal(t, expected, frame(flvio.FRAME_KEY, keyFrame))
+
+	// the stream keeps the first config
+	require.Equal(t, 320, prober.Streams[0].(av.VideoCodecData).Width())
+
+	// back to the config of the stream
+	seqhdr(recordA)
+	require.Equal(t, keyFrame, frame(flvio.FRAME_KEY, keyFrame))
+}
+
+func TestProberMidStreamSequenceHeaderWhileProbing(t *testing.T) {
+	recordA := decodeHex(t, avcRecord320x240)
+	recordB := decodeHex(t, avcRecord640x360)
+	codecDataB, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(recordB)
+	require.NoError(t, err)
+
+	keyFrame := []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x88}
+
+	prober := NewProber(0)
+	prober.HasAudio = true
+	prober.HasVideo = true
+	require.NoError(t, prober.PushTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordA), 0))
+	require.NoError(t, prober.PushTag(avcTag(flvio.AVC_NALU, flvio.FRAME_KEY, keyFrame), 0))
+	require.NoError(t, prober.PushTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordB), 40))
+	require.NoError(t, prober.PushTag(avcTag(flvio.AVC_NALU, flvio.FRAME_KEY, keyFrame), 40))
+	require.False(t, prober.Probed())
+	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_SEQHDR, []byte{0x12, 0x10}), 40))
+	require.True(t, prober.Probed())
+	require.Len(t, prober.Streams, 2)
+
+	require.False(t, prober.Empty())
+	require.Equal(t, keyFrame, prober.PopPacket().Data)
+	require.False(t, prober.Empty())
+	require.Equal(t, withParamSets(keyFrame, codecDataB.SPS(), codecDataB.PPS()), prober.PopPacket().Data)
+	require.True(t, prober.Empty())
+}
+
+func TestProberMidStreamSequenceHeaderHEVC(t *testing.T) {
+	recordA := hevcRecord(t, hevcParamSets320x240)
+	recordB := hevcRecord(t, hevcParamSets640x360)
+
+	keyFrame := []byte{0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xaf}
+
+	prober := NewProber(0)
+	prober.HasVideo = true
+	require.NoError(t, prober.PushTag(exVideoTag(flvio.FOURCC_HEVC, flvio.PKTTYPE_SEQUENCE_START, recordA), 0))
+	require.True(t, prober.Probed())
+
+	_, ok := prober.TagToPacket(exVideoTag(flvio.FOURCC_HEVC, flvio.PKTTYPE_SEQUENCE_START, recordB), 0)
+	require.False(t, ok)
+
+	pkt, ok := prober.TagToPacket(exVideoTag(flvio.FOURCC_HEVC, flvio.PKTTYPE_CODED_FRAMESX, keyFrame), 0)
+	require.True(t, ok)
+	require.Equal(t, withParamSets(keyFrame, decodeHex(t, hevcParamSets640x360[0]), decodeHex(t, hevcParamSets640x360[1]), decodeHex(t, hevcParamSets640x360[2])), pkt.Data)
+}
+
+func TestProberMidStreamSequenceHeaderIgnored(t *testing.T) {
+	recordA := decodeHex(t, avcRecord320x240)
+
+	// NALU length size 2 instead of 4
+	otherLengthSize := decodeHex(t, avcRecord640x360)
+	otherLengthSize[4] = 0xfd
+
+	keyFrame := []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x88}
+
+	for name, tag := range map[string]flvio.Tag{
+		"invalid":           avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, []byte{0x01, 0x02}),
+		"other length size": avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, otherLengthSize),
+		"other codec":       exVideoTag(flvio.FOURCC_HEVC, flvio.PKTTYPE_SEQUENCE_START, hevcRecord(t, hevcParamSets640x360)),
+	} {
+		prober := NewProber(0)
+		prober.HasVideo = true
+		require.NoError(t, prober.PushTag(avcTag(flvio.AVC_SEQHDR, flvio.FRAME_KEY, recordA), 0), name)
+		require.True(t, prober.Probed(), name)
+
+		_, ok := prober.TagToPacket(tag, 0)
+		require.False(t, ok, name)
+
+		pkt, ok := prober.TagToPacket(avcTag(flvio.AVC_NALU, flvio.FRAME_KEY, keyFrame), 0)
+		require.True(t, ok, name)
+		require.Equal(t, keyFrame, pkt.Data, name)
 	}
 }

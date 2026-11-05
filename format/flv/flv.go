@@ -2,6 +2,7 @@ package flv
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 
@@ -104,6 +105,15 @@ type Prober struct {
 
 	// the last error of PushTag
 	lastErr error
+
+	// the config record of the video stream (H.264, HEVC) that applies to the following packets, and its
+	// codec data. It differs from the one in Streams after a new sequence header in the middle of the stream.
+	videoRecord    []byte
+	videoCodecData av.VideoCodecData
+
+	// the parameter sets of videoRecord, length-prefixed as the NALUs in the frames. They are put in front
+	// of every key frame as long as the config differs from the one in Streams. It is nil otherwise.
+	videoParamSets []byte
 }
 
 type colorInfoUpdate struct {
@@ -170,6 +180,11 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 						prober.VideoStreamIdx = len(prober.Streams)
 						prober.Streams = append(prober.Streams, stream)
 						prober.GotVideo = true
+						prober.videoRecord = tag.Data
+						prober.videoCodecData = stream
+					} else {
+						// a new config in the middle of the stream
+						prober.CacheTag(tag, timestamp)
 					}
 				} else if tag.PacketType == flvio.PKTTYPE_CODED_FRAMES || tag.PacketType == flvio.PKTTYPE_CODED_FRAMESX {
 					prober.CacheTag(tag, timestamp)
@@ -245,6 +260,11 @@ func (prober *Prober) PushTag(tag flvio.Tag, timestamp int64) (err error) {
 					prober.VideoStreamIdx = len(prober.Streams)
 					prober.Streams = append(prober.Streams, stream)
 					prober.GotVideo = true
+					prober.videoRecord = tag.Data
+					prober.videoCodecData = stream
+				} else {
+					// a new config in the middle of the stream
+					prober.CacheTag(tag, timestamp)
 				}
 
 			case flvio.AVC_NALU:
@@ -455,14 +475,93 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 	return 0
 }
 
+// isVideoSequenceStart returns whether the tag is a video sequence header (config record).
+func isVideoSequenceStart(tag flvio.Tag) bool {
+	if tag.Type != flvio.TAG_VIDEO {
+		return false
+	}
+	if tag.IsExHeader {
+		return tag.PacketType == flvio.PKTTYPE_SEQUENCE_START
+	}
+	return tag.CodecID == flvio.VIDEO_H264 && tag.AVCPacketType == flvio.AVC_SEQHDR
+}
+
+// lengthPrefixed returns the NALUs, each prefixed with its length in lengthSize bytes, as in the frames.
+func lengthPrefixed(lengthSize int, nalus ...[][]byte) []byte {
+	var b []byte
+	for _, list := range nalus {
+		for _, nalu := range list {
+			for i := lengthSize - 1; i >= 0; i-- {
+				b = append(b, byte(len(nalu)>>(8*i)))
+			}
+			b = append(b, nalu...)
+		}
+	}
+	return b
+}
+
+// updateVideoConfig handles a sequence header of the video stream after the first one. A re-sent,
+// identical config is ignored. A new H.264 or HEVC config is put in-band: its parameter sets are put in
+// front of every following key frame, such that a decoder (also one that joins later) uses them instead of
+// the ones in the codec data of the stream. A change back to the config of the stream stops that.
+//
+// Not supported: a new config of other codecs, a change of the codec, and a different NALU length size.
+// Streams() keeps the codec data of the first config (e.g. its width and height).
+func (prober *Prober) updateVideoConfig(tag flvio.Tag) {
+	if !prober.GotVideo || prober.VideoStreamIdx >= len(prober.Streams) {
+		return
+	}
+	stream := prober.Streams[prober.VideoStreamIdx]
+	if stream.Type() != tagCodecType(tag) || bytes.Equal(tag.Data, prober.videoRecord) {
+		return
+	}
+
+	record := append([]byte(nil), tag.Data...)
+
+	switch stream := stream.(type) {
+	case h264parser.CodecData:
+		codecData, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(record)
+		if err != nil || codecData.RecordInfo.LengthSizeMinusOne != stream.RecordInfo.LengthSizeMinusOne {
+			return
+		}
+		prober.videoCodecData = codecData
+		prober.videoParamSets = lengthPrefixed(int(stream.RecordInfo.LengthSizeMinusOne)+1, codecData.RecordInfo.SPS, codecData.RecordInfo.PPS)
+		if bytes.Equal(record, stream.AVCDecoderConfRecordBytes()) {
+			prober.videoParamSets = nil
+		}
+
+	case hevcparser.CodecData:
+		codecData, err := hevcparser.NewCodecDataFromHEVCDecoderConfRecord(record)
+		if err != nil || codecData.RecordInfo.LengthSizeMinusOne != stream.RecordInfo.LengthSizeMinusOne {
+			return
+		}
+		prober.videoCodecData = codecData
+		prober.videoParamSets = lengthPrefixed(int(stream.RecordInfo.LengthSizeMinusOne)+1, codecData.RecordInfo.VPS, codecData.RecordInfo.SPS, codecData.RecordInfo.PPS)
+		if bytes.Equal(record, stream.HEVCDecoderConfRecordBytes()) {
+			prober.videoParamSets = nil
+		}
+
+	default:
+		return
+	}
+
+	prober.videoRecord = record
+}
+
 // TagToPacket converts an audio or video tag to a packet of the probed stream of its kind. If there's no
 // such stream, or the codec of the tag doesn't match the codec of the stream, it returns false. A tag with
-// color info (E-RTMP) updates ColorInfo and returns false.
+// color info (E-RTMP) updates ColorInfo and returns false. A video sequence header returns false, a new
+// config is put in-band into the following key frames (see updateVideoConfig).
 func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet, ok bool) {
 	if isVideoMetadata(tag) {
 		if colorInfo, found := flvio.ParseColorInfo(tag.Data); found {
 			prober.ColorInfo = colorInfo
 		}
+		return
+	}
+
+	if isVideoSequenceStart(tag) {
+		prober.updateVideoConfig(tag)
 		return
 	}
 
@@ -496,6 +595,11 @@ func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet
 			pkt.Data = tag.Data
 			pkt.CompositionTime = flvio.TsToTime(tag.CompositionTime)
 			pkt.IsKeyFrame = tag.FrameType == flvio.FRAME_KEY
+			if pkt.IsKeyFrame && prober.videoParamSets != nil {
+				data := make([]byte, 0, len(prober.videoParamSets)+len(tag.Data))
+				data = append(data, prober.videoParamSets...)
+				pkt.Data = append(data, tag.Data...)
+			}
 		}
 
 	case flvio.TAG_AUDIO:

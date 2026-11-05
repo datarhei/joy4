@@ -3040,3 +3040,58 @@ func TestClientApp(t *testing.T) {
 		require.Equal(t, test.stream, publish[0], test.app)
 	}
 }
+
+func TestReadMidStreamSequenceHeader(t *testing.T) {
+	// H.264 config records of FFmpeg (libx264) with 320x240 and 640x360
+	recordA, err := hex.DecodeString("01f4000dffe1001867f4000d91968141fb011000000300100000030320f142aa01000568ce0f1920fff8f800")
+	require.NoError(t, err)
+	recordB, err := hex.DecodeString("01f4001effe1001967f4001e919680a02ff89c0440000003004000000c83c58ba801000568ce0f1920fff8f800")
+	require.NoError(t, err)
+	spsB, ppsB := recordB[8:8+0x19], recordB[8+0x19+3:8+0x19+3+5]
+
+	avc := func(frameType, avcPacketType byte, data ...byte) []byte {
+		return append([]byte{frameType<<4 | flvio.VIDEO_H264, avcPacketType, 0, 0, 0}, data...)
+	}
+	video := func(timestamp uint32, payload []byte) []byte {
+		return chunkMessage(6, timestamp, msgtypeidVideoMsg, 1, payload, 128)
+	}
+
+	keyFrame := []byte{0x00, 0x00, 0x00, 0x02, 0x65, 0x88}
+	interFrame := []byte{0x00, 0x00, 0x00, 0x02, 0x41, 0x9a}
+
+	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"})
+	data = append(data, commandMessage("createStream", 2.0, nil)...)
+	data = append(data, commandMessage("publish", 3.0, nil, "test", "live")...)
+	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"videocodecid": 7.0})...)
+	data = concat(data,
+		video(0, avc(flvio.FRAME_KEY, flvio.AVC_SEQHDR, recordA...)),
+		video(0, avc(flvio.FRAME_KEY, flvio.AVC_NALU, keyFrame...)),
+		video(40, avc(flvio.FRAME_INTER, flvio.AVC_NALU, interFrame...)),
+		// the resolution changes
+		video(80, avc(flvio.FRAME_KEY, flvio.AVC_SEQHDR, recordB...)),
+		video(80, avc(flvio.FRAME_KEY, flvio.AVC_NALU, keyFrame...)),
+		video(120, avc(flvio.FRAME_INTER, flvio.AVC_NALU, interFrame...)),
+		video(160, avc(flvio.FRAME_KEY, flvio.AVC_NALU, keyFrame...)),
+	)
+
+	conn := newReadConn(data)
+	conn.isserver = true
+	conn.stage = stageHandshakeDone
+
+	streams, err := conn.Streams()
+	require.NoError(t, err)
+	require.Len(t, streams, 1)
+	require.Equal(t, 320, streams[0].(av.VideoCodecData).Width())
+
+	withB := []byte{0x00, 0x00, 0x00, byte(len(spsB))}
+	withB = append(withB, spsB...)
+	withB = append(withB, 0x00, 0x00, 0x00, byte(len(ppsB)))
+	withB = append(withB, ppsB...)
+	withB = append(withB, keyFrame...)
+
+	for i, expected := range [][]byte{keyFrame, interFrame, withB, interFrame, withB} {
+		pkt, err := conn.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		require.Equal(t, expected, pkt.Data, "packet %d", i)
+	}
+}
