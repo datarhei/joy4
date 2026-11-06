@@ -2710,7 +2710,7 @@ func (conn *Conn) handleMsg(timestamp int64, msgsid uint32, msgtypeid uint8, msg
 		// the frame type is to be ignored for metadata (e.g. the color info), other frame types (e.g.
 		// command frames) don't contain video data
 		isMetadata := tag.IsExHeader && tag.PacketType == flvio.PKTTYPE_METADATA
-		if !isMetadata && !(tag.FrameType == flvio.FRAME_INTER || tag.FrameType == flvio.FRAME_KEY) {
+		if !isMetadata && !(tag.FrameType == flvio.FRAME_INTER || tag.FrameType == flvio.FRAME_KEY || tag.FrameType == flvio.FRAME_DISPOSABLE) {
 			return
 		}
 		tag.Data = msgdata[n:]

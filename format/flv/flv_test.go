@@ -15,6 +15,7 @@ import (
 	"github.com/datarhei/joy4/codec/ac3parser"
 	"github.com/datarhei/joy4/codec/fake"
 	"github.com/datarhei/joy4/codec/flacparser"
+	"github.com/datarhei/joy4/codec/h263parser"
 	"github.com/datarhei/joy4/codec/h264parser"
 	"github.com/datarhei/joy4/codec/hevcparser"
 	"github.com/datarhei/joy4/codec/mp3parser"
@@ -220,30 +221,30 @@ func TestProberCachedWithoutStream(t *testing.T) {
 }
 
 func TestProberLegacyCodec(t *testing.T) {
-	// the metadata announces audio and video, the video is Sorenson H.263 (codec id 2)
+	// the metadata announces audio and video, the video has an unsupported legacy codec (JPEG, codec id 1)
 	prober := NewProber(4)
 	prober.HasAudio = true
 	prober.HasVideo = true
 
-	h263 := func(data []byte) flvio.Tag {
+	jpeg := func(data []byte) flvio.Tag {
 		tag := flvio.Tag{Type: flvio.TAG_VIDEO}
-		_, err := tag.ParseHeader(append([]byte{0x12}, data...))
+		_, err := tag.ParseHeader(append([]byte{0x11}, data...))
 		require.NoError(t, err)
 		tag.Data = data
 		return tag
 	}
 
-	// the first byte of H.263 data would be AVC_SEQHDR, the second AVC_NALU
-	require.NoError(t, prober.PushTag(h263([]byte{0x00, 0x00, 0x84, 0x00}), 0))
+	// the first byte of the data would be AVC_SEQHDR, the second AVC_NALU
+	require.NoError(t, prober.PushTag(jpeg([]byte{0x00, 0x00, 0x84, 0x00}), 0))
 	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_SEQHDR, []byte{0x12, 0x10}), 0))
-	require.NoError(t, prober.PushTag(h263([]byte{0x01, 0x00, 0x84, 0x00}), 40))
+	require.NoError(t, prober.PushTag(jpeg([]byte{0x01, 0x00, 0x84, 0x00}), 40))
 	require.NoError(t, prober.PushTag(aacTag(flvio.AAC_RAW, []byte{0xAA}), 23))
 	require.True(t, prober.Probed())
 
 	require.Len(t, prober.Streams, 1)
 	require.Equal(t, av.AAC, prober.Streams[0].Type())
 
-	_, ok := prober.TagToPacket(h263([]byte{0x01, 0x02}), 80)
+	_, ok := prober.TagToPacket(jpeg([]byte{0x01, 0x02}), 80)
 	require.False(t, ok)
 
 	// only the audio packet is cached
@@ -476,12 +477,13 @@ func TestProberPushMetadata(t *testing.T) {
 		{flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_AV1)}, true, false},
 		{flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_VVC)}, true, false},
 		{flvio.AMFMap{"videocodecid": "hvc1"}, true, false},
+		{flvio.AMFMap{"videocodecid": 2.0}, true, false},
 		{flvio.AMFMap{"audiocodecid": 11.0}, false, true},
 		{flvio.AMFMap{"audiocodecid": 4.0}, false, true},
 		{flvio.AMFMap{"audiocodecid": 5.0}, false, true},
 		{flvio.AMFMap{"audiocodecid": 6.0}, false, true},
-		// unsupported: H.263, VP6, linear PCM, ADPCM, an unknown FourCC
-		{flvio.AMFMap{"videocodecid": 2.0, "audiocodecid": 3.0}, false, false},
+		// unsupported: JPEG, VP6, linear PCM, ADPCM, an unknown FourCC
+		{flvio.AMFMap{"videocodecid": 1.0, "audiocodecid": 3.0}, false, false},
 		{flvio.AMFMap{"videocodecid": 4.0, "audiocodecid": 1.0}, false, false},
 		{flvio.AMFMap{"videocodecid": "VP62", "audiocodecid": 0.0}, false, false},
 		{flvio.AMFMap{"audiocodecid": "Opus"}, false, true},
@@ -1859,4 +1861,114 @@ func TestCodecTypes(t *testing.T) {
 		require.NoError(t, muxer.WriteHeader([]av.CodecData{stream}), "%v", stream.Type())
 		require.NoError(t, muxer.WritePacket(av.Packet{Data: []byte{0x01}}), "%v", stream.Type())
 	}
+}
+
+// the start of Sorenson H.263 frames from FFmpeg's FLV1 encoder (320x240): a key frame, an inter frame, and
+// the inter frame as a disposable one (picture type 2)
+const (
+	h263Key        = "0000840292a62020"
+	h263Inter      = "00008406b13c28b0"
+	h263Disposable = "00008406d13c28b0"
+)
+
+func h263Tag(frameType uint8, data []byte) flvio.Tag {
+	return flvio.Tag{Type: flvio.TAG_VIDEO, FrameType: frameType, CodecID: flvio.VIDEO_H263, PacketType: flvio.PKTTYPE_CODED_FRAMES, Data: data}
+}
+
+func TestProberH263(t *testing.T) {
+	key, inter, disposable := decodeHex(t, h263Key), decodeHex(t, h263Inter), decodeHex(t, h263Disposable)
+
+	// the stream is created from the first frame, also an inter frame
+	prober := NewProber(0)
+	prober.PushMetadata(flvio.AMFMap{"videocodecid": float64(flvio.VIDEO_H263)})
+	require.True(t, prober.HasVideo)
+	require.NoError(t, prober.PushTag(h263Tag(flvio.FRAME_INTER, inter), 0))
+	require.True(t, prober.Probed())
+	require.Len(t, prober.Streams, 1)
+	stream := prober.Streams[0].(h263parser.CodecData)
+	require.Equal(t, av.H263, stream.Type())
+	require.Equal(t, 320, stream.Width())
+	require.Equal(t, 240, stream.Height())
+	require.Equal(t, av.Packet{Data: inter}, prober.PopPacket())
+
+	for _, tc := range []struct {
+		frameType uint8
+		data      []byte
+		key       bool
+	}{
+		{flvio.FRAME_KEY, key, true},
+		{flvio.FRAME_INTER, inter, false},
+		{flvio.FRAME_DISPOSABLE, disposable, false},
+	} {
+		pkt, ok := prober.TagToPacket(h263Tag(tc.frameType, tc.data), 40)
+		require.True(t, ok)
+		require.Equal(t, av.Packet{Data: tc.data, IsKeyFrame: tc.key, Time: 40}, pkt)
+	}
+
+	// the legacy header as it is parsed
+	tag := flvio.Tag{Type: flvio.TAG_VIDEO}
+	n, err := tag.ParseHeader(append([]byte{0x32}, disposable...))
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	tag.Data = disposable
+	pkt, ok := prober.TagToPacket(tag, 80)
+	require.True(t, ok)
+	require.False(t, pkt.IsKeyFrame)
+
+	// no picture header
+	prober = NewProber(0)
+	require.Error(t, prober.PushTag(h263Tag(flvio.FRAME_KEY, []byte{0x01, 0x02, 0x03, 0x04}), 0))
+}
+
+func TestMuxDemuxH263(t *testing.T) {
+	stream, err := h263parser.NewCodecDataFromFrame(decodeHex(t, h263Key))
+	require.NoError(t, err)
+	aac, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	streams := []av.CodecData{stream, aac}
+	packets := []av.Packet{
+		{Idx: 0, IsKeyFrame: true, Data: decodeHex(t, h263Key)},
+		{Idx: 1, IsKeyFrame: true, Data: []byte{0xAA}},
+		{Idx: 0, Data: decodeHex(t, h263Inter), Time: 40},
+		{Idx: 0, Data: decodeHex(t, h263Disposable), Time: 80},
+	}
+
+	buf := &bytes.Buffer{}
+	muxer := NewMuxer(buf)
+	require.NoError(t, muxer.WriteHeader(streams))
+	for _, pkt := range packets {
+		require.NoError(t, muxer.WritePacket(pkt))
+	}
+	require.NoError(t, muxer.WriteTrailer())
+
+	// the frame types: key, inter and disposable inter (from the picture type)
+	frameTypes := []uint8{}
+	for _, tag := range readTags(t, buf.Bytes()) {
+		if tag.Type == flvio.TAG_VIDEO {
+			require.Equal(t, uint8(flvio.VIDEO_H263), tag.CodecID)
+			frameTypes = append(frameTypes, tag.FrameType)
+		}
+	}
+	require.Equal(t, []uint8{flvio.FRAME_KEY, flvio.FRAME_INTER, flvio.FRAME_DISPOSABLE}, frameTypes)
+
+	// the H.263 stream is found with its first frame, after the sequence start of AAC
+	demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+	got, err := demuxer.Streams()
+	require.NoError(t, err)
+	require.Equal(t, []av.CodecData{aac, stream}, got)
+	for i, expected := range packets {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err, "packet %d", i)
+		expected.Idx = 1 - expected.Idx
+		require.Equal(t, expected, pkt, "packet %d", i)
+	}
+
+	metadata, err := NewMetadataByStreams(streams)
+	require.NoError(t, err)
+	require.Equal(t, flvio.VIDEO_H263, metadata["videocodecid"])
+	require.Equal(t, 320, metadata["width"])
+
+	// H.263 can't be a track from 1 on (no FourCC)
+	_, err = TrackIDs([]av.CodecData{stream, stream})
+	require.Error(t, err)
 }

@@ -2326,12 +2326,12 @@ func TestProbeNoStreamError(t *testing.T) {
 }
 
 func TestProbeUnsupportedMetadataCodec(t *testing.T) {
-	// the metadata announces H.263 video, which is not supported, and AAC audio. Probing ends with the
-	// AAC sequence header and doesn't wait for the H.263 video.
+	// the metadata announces JPEG video (codec id 1), which is not supported, and AAC audio. Probing ends
+	// with the AAC sequence header and doesn't wait for the video.
 	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"})
 	data = append(data, commandMessage("createStream", 2.0, nil)...)
 	data = append(data, commandMessage("publish", 3.0, nil, "test", "live")...)
-	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"audiocodecid": 10.0, "videocodecid": 2.0})...)
+	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"audiocodecid": 10.0, "videocodecid": 1.0})...)
 	data = append(data, chunkMessage(4, 0, msgtypeidAudioMsg, 1, []byte{0xAF, 0x00, 0x12, 0x10}, 128)...)
 	data = append(data, chunkMessage(4, 0, msgtypeidAudioMsg, 1, []byte{0xAF, 0x01, 0x00}, 128)...)
 
@@ -3420,4 +3420,32 @@ func (r blockingReader) Read(p []byte) (int, error) {
 func TestCodecTypes(t *testing.T) {
 	// RTMP writes the codecs of FLV
 	require.Equal(t, flv.CodecTypes, CodecTypes)
+}
+
+func TestReadH263DisposableFrame(t *testing.T) {
+	// Sorenson H.263 with a key frame, an inter frame and a disposable inter frame (frame type 3)
+	data := commandMessage("connect", 1.0, flvio.AMFMap{"app": "live", "tcUrl": "rtmp://localhost/live"})
+	data = append(data, commandMessage("createStream", 2.0, nil)...)
+	data = append(data, commandMessage("publish", 3.0, nil, "test", "live")...)
+	data = append(data, dataMessage("@setDataFrame", "onMetaData", flvio.AMFMap{"videocodecid": 2.0})...)
+	for _, frame := range []string{"120000840292a62020", "2200008406b13c28b0", "3200008406d13c28b0"} {
+		b, err := hex.DecodeString(frame)
+		require.NoError(t, err)
+		data = append(data, chunkMessage(6, 0, msgtypeidVideoMsg, 1, b, 128)...)
+	}
+
+	conn := newReadConn(data)
+	conn.isserver = true
+	conn.stage = stageHandshakeDone
+
+	streams, err := conn.Streams()
+	require.NoError(t, err)
+	require.Len(t, streams, 1)
+	require.Equal(t, av.H263, streams[0].Type())
+
+	for _, key := range []bool{true, false, false} {
+		pkt, err := conn.ReadPacket()
+		require.NoError(t, err)
+		require.Equal(t, key, pkt.IsKeyFrame)
+	}
 }

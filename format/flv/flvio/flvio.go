@@ -56,10 +56,12 @@ const (
 	AVC_NALU   = 1
 	AVC_EOS    = 2
 
-	FRAME_KEY     = 1
-	FRAME_INTER   = 2
-	FRAME_COMMAND = 5
+	FRAME_KEY        = 1
+	FRAME_INTER      = 2
+	FRAME_DISPOSABLE = 3 // disposable inter frame (H.263 only)
+	FRAME_COMMAND    = 5
 
+	VIDEO_H263 = 2 // Sorenson H.263
 	VIDEO_H264 = 7
 )
 

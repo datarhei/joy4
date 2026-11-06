@@ -120,6 +120,7 @@ var (
 	VP9        = MakeVideoCodecType(avCodecTypeMagic + 3)
 	AV1        = MakeVideoCodecType(avCodecTypeMagic + 4)
 	VVC        = MakeVideoCodecType(avCodecTypeMagic + 5)
+	H263       = MakeVideoCodecType(avCodecTypeMagic + 6) // Sorenson H.263 (Sorenson Spark)
 	AAC        = MakeAudioCodecType(avCodecTypeMagic + 1)
 	PCM_MULAW  = MakeAudioCodecType(avCodecTypeMagic + 2)
 	PCM_ALAW   = MakeAudioCodecType(avCodecTypeMagic + 3)
@@ -147,6 +148,8 @@ func (c CodecType) String() string {
 		return "AV1"
 	case VVC:
 		return "VVC"
+	case H263:
+		return "H263"
 	case AAC:
 		return "AAC"
 	case PCM_MULAW:
