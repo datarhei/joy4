@@ -3416,3 +3416,8 @@ func (r blockingReader) Read(p []byte) (int, error) {
 	<-r.done
 	return 0, io.EOF
 }
+
+func TestCodecTypes(t *testing.T) {
+	// RTMP writes the codecs of FLV
+	require.Equal(t, flv.CodecTypes, CodecTypes)
+}

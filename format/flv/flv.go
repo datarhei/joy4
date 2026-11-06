@@ -1564,7 +1564,8 @@ func NewMuxer(w io.Writer) *Muxer {
 	return muxer
 }
 
-var CodecTypes = []av.CodecType{av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.AAC, av.SPEEX}
+// CodecTypes are the codecs that the muxer writes.
+var CodecTypes = []av.CodecType{av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.AAC, av.SPEEX, av.NELLYMOSER, av.OPUS, av.FLAC, av.AC3, av.EAC3, av.MP3}
 
 func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 	var flags uint8

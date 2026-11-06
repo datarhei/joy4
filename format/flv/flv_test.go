@@ -1832,3 +1832,31 @@ func TestParseMetadata(t *testing.T) {
 	n += flvio.FillAMF0Val(data[n:], "no map")
 	require.Nil(t, ParseMetadata(data[:n]))
 }
+
+func TestCodecTypes(t *testing.T) {
+	// every audio codec that the muxer writes is in CodecTypes
+	aac, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	opus, err := opusparser.NewCodecData(2)
+	require.NoError(t, err)
+	flac, err := flacparser.NewCodecDataFromStreamInfo(decodeHex(t, flacStreamInfo51))
+	require.NoError(t, err)
+	ac3, err := ac3parser.NewCodecDataFromFrame(decodeHex(t, ac3FrameStereo))
+	require.NoError(t, err)
+	eac3, err := ac3parser.NewCodecDataFromFrame(decodeHex(t, eac3FrameStereo))
+	require.NoError(t, err)
+	mp3, err := mp3parser.NewCodecDataFromFrame(decodeHex(t, mp3FrameStereo48k))
+	require.NoError(t, err)
+
+	for _, stream := range []av.AudioCodecData{
+		aac, opus, flac, ac3, eac3, mp3,
+		codec.NewSpeexCodecData(16000, av.CH_MONO),
+		codec.NewNellymoserCodecData(16000, av.CH_MONO),
+	} {
+		require.Contains(t, CodecTypes, stream.Type())
+		buf := &bytes.Buffer{}
+		muxer := NewMuxer(buf)
+		require.NoError(t, muxer.WriteHeader([]av.CodecData{stream}), "%v", stream.Type())
+		require.NoError(t, muxer.WritePacket(av.Packet{Data: []byte{0x01}}), "%v", stream.Type())
+	}
+}
