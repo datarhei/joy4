@@ -1723,24 +1723,6 @@ func (conn *Conn) Multitrack() bool {
 	return conn.peerMultitrack
 }
 
-// streamsToWrite returns which of the streams are written: all of them with multitrack, otherwise only the
-// first video and the first audio stream (the default tracks).
-func streamsToWrite(streams []av.CodecData, multitrack bool) []bool {
-	write := make([]bool, len(streams))
-	video, audio := false, false
-	for i, stream := range streams {
-		switch {
-		case multitrack:
-			write[i] = true
-		case stream.Type().IsVideo() && !video:
-			write[i], video = true, true
-		case stream.Type().IsAudio() && !audio:
-			write[i], audio = true, true
-		}
-	}
-	return write
-}
-
 func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 	if err = conn.prepare(stageCommandDone, prepareWriting); err != nil {
 		return
@@ -1748,24 +1730,9 @@ func (conn *Conn) WriteHeader(streams []av.CodecData) (err error) {
 
 	var metadata flvio.AMFMap
 
-	writeStreams := streamsToWrite(streams, conn.Multitrack())
-	written := []av.CodecData{}
-	for i, stream := range streams {
-		if writeStreams[i] {
-			written = append(written, stream)
-		}
-	}
-
-	var writtenTrackIDs []uint8
-	if writtenTrackIDs, err = flv.TrackIDs(written); err != nil {
+	writeStreams, written, trackIDs, err := flv.SelectTracks(streams, conn.Multitrack())
+	if err != nil {
 		return
-	}
-	trackIDs := make([]uint8, len(streams))
-	for i, n := 0, 0; i < len(streams); i++ {
-		if writeStreams[i] {
-			trackIDs[i] = writtenTrackIDs[n]
-			n++
-		}
 	}
 
 	if metadata, err = flv.NewMetadataByStreams(written); err != nil {

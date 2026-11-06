@@ -199,6 +199,40 @@ func TrackIDs(streams []av.CodecData) ([]uint8, error) {
 	return trackIDs, nil
 }
 
+// SelectTracks returns which of the streams are written, the written streams, and the track id of each
+// stream (see TrackIDs, 0 for a stream that isn't written): all streams with multitrack, otherwise only the
+// first video and the first audio stream (the default tracks).
+func SelectTracks(streams []av.CodecData, multitrack bool) (write []bool, written []av.CodecData, trackIDs []uint8, err error) {
+	write = make([]bool, len(streams))
+	video, audio := false, false
+	for i, stream := range streams {
+		switch {
+		case multitrack:
+			write[i] = true
+		case stream.Type().IsVideo() && !video:
+			write[i], video = true, true
+		case stream.Type().IsAudio() && !audio:
+			write[i], audio = true, true
+		}
+		if write[i] {
+			written = append(written, stream)
+		}
+	}
+
+	var writtenTrackIDs []uint8
+	if writtenTrackIDs, err = TrackIDs(written); err != nil {
+		return
+	}
+	trackIDs = make([]uint8, len(streams))
+	for i, n := 0, 0; i < len(streams); i++ {
+		if write[i] {
+			trackIDs[i] = writtenTrackIDs[n]
+			n++
+		}
+	}
+	return
+}
+
 // audioFourCC returns the FourCC of the ExAudioTagHeader (E-RTMP v2) of an audio codec.
 func audioFourCC(typ av.CodecType) ([4]byte, bool) {
 	switch typ {
@@ -1662,6 +1696,10 @@ type Muxer struct {
 	streams  []av.CodecData
 	trackIDs []uint8
 
+	// whether all streams are written as tracks (see SetMultitrack), and which streams are written
+	multitrack   bool
+	writeStreams []bool
+
 	colorInfo        flvio.AMFMap
 	colorInfoPending bool
 
@@ -1698,9 +1736,27 @@ func NewMuxer(w io.Writer) *Muxer {
 // CodecTypes are the codecs that the muxer writes.
 var CodecTypes = []av.CodecType{av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.H263, av.FLASHSV, av.FLASHSV2, av.VP6, av.VP6A, av.AAC, av.SPEEX, av.NELLYMOSER, av.OPUS, av.FLAC, av.AC3, av.EAC3, av.MP3}
 
+// SetMultitrack sets whether all streams are written as tracks of a multitrack stream (E-RTMP v2), or only
+// the first video and the first audio stream (the default tracks); the packets of the other streams are
+// dropped. It must be called before WriteHeader. By default, only the default tracks are written, because
+// not every FLV reader supports multitrack (e.g. browser players).
+func (muxer *Muxer) SetMultitrack(enabled bool) {
+	muxer.multitrack = enabled
+}
+
+// Multitrack returns whether all streams are written as tracks of a multitrack stream (see SetMultitrack).
+func (muxer *Muxer) Multitrack() bool {
+	return muxer.multitrack
+}
+
 func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
+	writeStreams, written, trackIDs, err := SelectTracks(streams, muxer.multitrack)
+	if err != nil {
+		return
+	}
+
 	var flags uint8
-	for _, stream := range streams {
+	for _, stream := range written {
 		if stream.Type().IsVideo() {
 			flags |= flvio.FILE_HAS_VIDEO
 		} else if stream.Type().IsAudio() {
@@ -1708,13 +1764,8 @@ func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 		}
 	}
 
-	var trackIDs []uint8
-	if trackIDs, err = TrackIDs(streams); err != nil {
-		return
-	}
-
 	var metadata flvio.AMFMap
-	if metadata, err = NewMetadataByStreams(streams); err != nil {
+	if metadata, err = NewMetadataByStreams(written); err != nil {
 		return
 	}
 
@@ -1751,6 +1802,9 @@ func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 	}
 
 	for i, stream := range streams {
+		if !writeStreams[i] {
+			continue
+		}
 		var tags []flvio.Tag
 		if tags, err = TrackCodecDataTags(stream, trackIDs[i]); err != nil {
 			return
@@ -1764,6 +1818,7 @@ func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 
 	muxer.streams = streams
 	muxer.trackIDs = trackIDs
+	muxer.writeStreams = writeStreams
 	return
 }
 
@@ -1775,6 +1830,11 @@ func (muxer *Muxer) SetColorInfo(colorInfo flvio.AMFMap) {
 }
 
 func (muxer *Muxer) WritePacket(pkt av.Packet) (err error) {
+	if !muxer.writeStreams[pkt.Idx] {
+		// not a default track, and multitrack is off
+		return
+	}
+
 	stream := muxer.streams[pkt.Idx]
 	trackID := muxer.trackIDs[pkt.Idx]
 	tag, timestamp := PacketToTag(pkt, stream)

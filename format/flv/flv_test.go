@@ -1054,6 +1054,7 @@ func TestMuxDemuxTracks(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	muxer := NewMuxer(buf)
+	muxer.SetMultitrack(true)
 	require.NoError(t, muxer.WriteHeader(streams))
 	for _, pkt := range packets {
 		require.NoError(t, muxer.WritePacket(pkt))
@@ -1070,8 +1071,78 @@ func TestMuxDemuxTracks(t *testing.T) {
 		require.Equal(t, expected, pkt, "packet %d", i)
 	}
 
-	// a stream that can't be a track
-	require.Error(t, NewMuxer(&bytes.Buffer{}).WriteHeader([]av.CodecData{aac44, codec.NewSpeexCodecData(16000, av.CH_MONO)}))
+	// a stream that can't be a track: an error with multitrack, without it the stream isn't written
+	speexTrack := []av.CodecData{aac44, codec.NewSpeexCodecData(16000, av.CH_MONO)}
+	muxer = NewMuxer(&bytes.Buffer{})
+	muxer.SetMultitrack(true)
+	require.Error(t, muxer.WriteHeader(speexTrack))
+	require.NoError(t, NewMuxer(&bytes.Buffer{}).WriteHeader(speexTrack))
+}
+
+func TestMuxerDefaultTracks(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+	aac44, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	aac48, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x11, 0x90})
+	require.NoError(t, err)
+	// 2 video and 2 audio streams, the default tracks are the first video and the first audio stream
+	streams := []av.CodecData{aac44, h264, aac48, h264}
+	packets := []av.Packet{
+		{Idx: 1, IsKeyFrame: true, Data: []byte{0xA0}},
+		{Idx: 3, IsKeyFrame: true, Data: []byte{0xA1}},
+		{Idx: 0, IsKeyFrame: true, Data: []byte{0xB0}},
+		{Idx: 2, IsKeyFrame: true, Data: []byte{0xB1}},
+	}
+
+	for _, multitrack := range []bool{false, true} {
+		buf := &bytes.Buffer{}
+		muxer := NewMuxer(buf)
+		require.False(t, muxer.Multitrack())
+		muxer.SetMultitrack(multitrack)
+		require.Equal(t, multitrack, muxer.Multitrack())
+		require.NoError(t, muxer.WriteHeader(streams))
+		for _, pkt := range packets {
+			require.NoError(t, muxer.WritePacket(pkt))
+		}
+		require.NoError(t, muxer.WriteTrailer())
+
+		tags := readTags(t, buf.Bytes())
+		metadata := ParseMetadata(tags[0].Data)
+		trackIDs := []uint8{}
+		for _, tag := range tags[1:] {
+			trackIDs = append(trackIDs, tag.TrackID)
+		}
+
+		demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+		got, err := demuxer.Streams()
+		require.NoError(t, err)
+
+		if !multitrack {
+			// only the default tracks: their sequence starts and packets, no TrackIdInfoMaps
+			require.Equal(t, []uint8{0, 0, 0, 0}, trackIDs)
+			require.NotContains(t, metadata, "videoTrackIdInfoMap")
+			require.NotContains(t, metadata, "audioTrackIdInfoMap")
+			require.Equal(t, []av.CodecData{aac44, h264}, got)
+			for _, data := range [][]byte{{0xA0}, {0xB0}} {
+				pkt, err := demuxer.ReadPacket()
+				require.NoError(t, err)
+				require.Equal(t, data, pkt.Data)
+			}
+			_, err = demuxer.ReadPacket()
+			require.Equal(t, io.EOF, err)
+			continue
+		}
+
+		require.Contains(t, metadata, "videoTrackIdInfoMap")
+		require.Contains(t, metadata, "audioTrackIdInfoMap")
+		require.Equal(t, streams, got)
+		for _, expected := range packets {
+			pkt, err := demuxer.ReadPacket()
+			require.NoError(t, err)
+			require.Equal(t, expected, pkt)
+		}
+	}
 }
 
 func TestMetadataTracks(t *testing.T) {
@@ -1186,6 +1257,7 @@ func TestMuxDemuxOpus(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	muxer := NewMuxer(buf)
+	muxer.SetMultitrack(true)
 	require.NoError(t, muxer.WriteHeader(streams))
 	for _, pkt := range packets {
 		require.NoError(t, muxer.WritePacket(pkt))
@@ -1308,6 +1380,7 @@ func TestMuxDemuxFLAC(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	muxer := NewMuxer(buf)
+	muxer.SetMultitrack(true)
 	require.NoError(t, muxer.WriteHeader(streams))
 	for _, pkt := range packets {
 		require.NoError(t, muxer.WritePacket(pkt))
@@ -1455,6 +1528,7 @@ func TestMuxDemuxAC3(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	muxer := NewMuxer(buf)
+	muxer.SetMultitrack(true)
 	require.NoError(t, muxer.WriteHeader(streams))
 	for _, pkt := range packets {
 		require.NoError(t, muxer.WritePacket(pkt))
@@ -1551,6 +1625,7 @@ func TestMuxDemuxMP3(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	muxer := NewMuxer(buf)
+	muxer.SetMultitrack(true)
 	require.NoError(t, muxer.WriteHeader(streams))
 	for _, pkt := range packets {
 		require.NoError(t, muxer.WritePacket(pkt))
@@ -1709,6 +1784,7 @@ func TestMuxerMetadata(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	muxer := NewMuxer(buf)
+	muxer.SetMultitrack(true)
 	require.NoError(t, muxer.WriteHeader(streams))
 	require.NoError(t, muxer.WritePacket(av.Packet{Idx: 0, IsKeyFrame: true, Data: []byte{0xA0}}))
 	require.NoError(t, muxer.WriteTrailer())
