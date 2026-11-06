@@ -3,8 +3,10 @@ package flv
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 
@@ -1531,6 +1533,13 @@ type Muxer struct {
 
 	colorInfo        flvio.AMFMap
 	colorInfoPending bool
+
+	// a seekable writer (see NewMuxer), the duration and file size in the metadata are updated in WriteTrailer
+	seeker io.WriteSeeker
+	// the position of the file in the writer, and the positions of the duration and file size values
+	start, durationPos, filesizePos int64
+	// the time of the last packet
+	lastTime int64
 }
 
 type writeFlusher interface {
@@ -1545,8 +1554,14 @@ func NewMuxerWriteFlusher(w writeFlusher) *Muxer {
 	}
 }
 
+// NewMuxer returns a muxer that writes to w. If w is seekable (e.g. a file), the metadata has the duration and
+// the file size, which are written in WriteTrailer.
 func NewMuxer(w io.Writer) *Muxer {
-	return NewMuxerWriteFlusher(bufio.NewWriterSize(w, pio.RecommendBufioSize))
+	muxer := NewMuxerWriteFlusher(bufio.NewWriterSize(w, pio.RecommendBufioSize))
+	if seeker, ok := w.(io.WriteSeeker); ok {
+		muxer.seeker = seeker
+	}
+	return muxer
 }
 
 var CodecTypes = []av.CodecType{av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.AAC, av.SPEEX}
@@ -1566,9 +1581,41 @@ func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 		return
 	}
 
+	var metadata flvio.AMFMap
+	if metadata, err = NewMetadataByStreams(streams); err != nil {
+		return
+	}
+
+	if muxer.seeker != nil {
+		// e.g. a pipe isn't seekable, although it is an *os.File
+		if muxer.start, err = muxer.seeker.Seek(0, io.SeekCurrent); err != nil {
+			muxer.seeker = nil
+			err = nil
+		}
+	}
+	if muxer.seeker != nil {
+		// placeholders, see WriteTrailer
+		metadata["duration"] = 0.0
+		metadata["filesize"] = 0.0
+	}
+
 	n := flvio.FillFileHeader(muxer.b, flags)
 	if _, err = muxer.bufw.Write(muxer.b[:n]); err != nil {
 		return
+	}
+
+	metadataTag := MetadataToTag(metadata)
+	if err = flvio.WriteTag(muxer.bufw, metadataTag, 0, muxer.b); err != nil {
+		return
+	}
+	if muxer.seeker != nil {
+		pos := muxer.start + int64(n+flvio.TagHeaderLength)
+		duration, filesize := amfNumberOffset(metadataTag.Data, "duration"), amfNumberOffset(metadataTag.Data, "filesize")
+		if duration < 0 || filesize < 0 {
+			muxer.seeker = nil
+		}
+		muxer.durationPos = pos + int64(duration)
+		muxer.filesizePos = pos + int64(filesize)
 	}
 
 	for i, stream := range streams {
@@ -1614,14 +1661,64 @@ func (muxer *Muxer) WritePacket(pkt av.Packet) (err error) {
 	if err = flvio.WriteTag(muxer.bufw, tag, timestamp, muxer.b); err != nil {
 		return
 	}
+	if pkt.Time > muxer.lastTime {
+		muxer.lastTime = pkt.Time
+	}
 	return
 }
 
+// WriteTrailer flushes the written tags. With a seekable writer, it writes the duration (the time of the last
+// packet) and the file size into the metadata.
 func (muxer *Muxer) WriteTrailer() (err error) {
 	if err = muxer.bufw.Flush(); err != nil {
 		return
 	}
+	if muxer.seeker == nil {
+		return
+	}
+
+	var end int64
+	if end, err = muxer.seeker.Seek(0, io.SeekCurrent); err != nil {
+		return
+	}
+	for _, v := range []struct {
+		pos   int64
+		value float64
+	}{
+		{muxer.durationPos, float64(muxer.lastTime) / 1000},
+		{muxer.filesizePos, float64(end - muxer.start)},
+	} {
+		if _, err = muxer.seeker.Seek(v.pos, io.SeekStart); err != nil {
+			return
+		}
+		binary.BigEndian.PutUint64(muxer.b, math.Float64bits(v.value))
+		if _, err = muxer.seeker.Write(muxer.b[:8]); err != nil {
+			return
+		}
+	}
+	_, err = muxer.seeker.Seek(end, io.SeekStart)
 	return
+}
+
+// MetadataToTag returns the script tag of the metadata (onMetaData).
+func MetadataToTag(metadata flvio.AMFMap) flvio.Tag {
+	name := "onMetaData"
+	data := make([]byte, flvio.LenAMF0Val(name)+flvio.LenAMF0Val(metadata))
+	n := flvio.FillAMF0Val(data, name)
+	flvio.FillAMF0Val(data[n:], metadata)
+	return flvio.Tag{Type: flvio.TAG_SCRIPTDATA, Data: data}
+}
+
+// amfNumberOffset returns the offset of the value of the number property key of the encoded AMF0 object in
+// data, or -1.
+func amfNumberOffset(data []byte, key string) int {
+	property := append([]byte{0, byte(len(key))}, key...)
+	property = append(property, 0x00) // number marker
+	i := bytes.Index(data, property)
+	if i < 0 {
+		return -1
+	}
+	return i + len(property)
 }
 
 type Demuxer struct {
@@ -1688,6 +1785,10 @@ func (demuxer *Demuxer) prepare() (err error) {
 				if tag, timestamp, err = demuxer.readTag(); err != nil {
 					return
 				}
+				if tag.Type == flvio.TAG_SCRIPTDATA {
+					demuxer.pushMetadata(tag)
+					continue
+				}
 				if err = demuxer.prober.PushTag(tag, timestamp); err != nil {
 					return
 				}
@@ -1710,6 +1811,44 @@ func (demuxer *Demuxer) Streams() (streams []av.CodecData, err error) {
 // the following ones. It is nil if no color info has been received or it has been reset.
 func (demuxer *Demuxer) GetColorInfo() flvio.AMFMap {
 	return demuxer.prober.ColorInfo
+}
+
+// pushMetadata passes the metadata (onMetaData) of a script tag to the prober. The codecs in the metadata
+// replace the flags of the file header, such that an unsupported codec isn't waited for.
+func (demuxer *Demuxer) pushMetadata(tag flvio.Tag) {
+	metadata := ParseMetadata(tag.Data)
+	if metadata == nil {
+		return
+	}
+	if _, ok := metadata["videocodecid"]; ok {
+		demuxer.prober.HasVideo = false
+	}
+	if _, ok := metadata["audiocodecid"]; ok {
+		demuxer.prober.HasAudio = false
+	}
+	demuxer.prober.PushMetadata(metadata)
+}
+
+// ParseMetadata returns the metadata (onMetaData) in the data of a script tag, or nil.
+func ParseMetadata(data []byte) flvio.AMFMap {
+	var vals []interface{}
+	for len(data) != 0 {
+		val, n, err := flvio.ParseAMF0Val(data)
+		if err != nil {
+			break
+		}
+		vals = append(vals, val)
+		data = data[n:]
+	}
+	// "onMetaData" is followed by the metadata, also after "@setDataFrame"
+	for i, val := range vals {
+		if name, ok := val.(string); ok && name == "onMetaData" && i+1 < len(vals) {
+			if metadata, ok := vals[i+1].(flvio.AMFMap); ok {
+				return metadata
+			}
+		}
+	}
+	return nil
 }
 
 func (demuxer *Demuxer) ReadPacket() (pkt av.Packet, err error) {

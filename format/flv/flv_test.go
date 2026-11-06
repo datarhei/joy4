@@ -3,6 +3,9 @@ package flv
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
+	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -1672,4 +1675,160 @@ func TestTrackCodecDataTags(t *testing.T) {
 	tags, err = TrackCodecDataTags(h264, 1)
 	require.NoError(t, err)
 	require.Len(t, tags, 1)
+}
+
+// readTags returns the tags of an FLV file.
+func readTags(t *testing.T, b []byte) []flvio.Tag {
+	r := bytes.NewReader(b)
+	_, err := r.Seek(flvio.FileHeaderLength+4, io.SeekStart)
+	require.NoError(t, err)
+	tags := []flvio.Tag{}
+	for {
+		tag, _, err := flvio.ReadTag(r, make([]byte, 256))
+		if err == io.EOF {
+			return tags
+		}
+		require.NoError(t, err)
+		tags = append(tags, tag)
+	}
+}
+
+func TestMuxerMetadata(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+	aac, err := aacparser.NewCodecDataFromMPEG4AudioConfigBytes([]byte{0x12, 0x10})
+	require.NoError(t, err)
+	streams := []av.CodecData{h264, h264, aac}
+
+	buf := &bytes.Buffer{}
+	muxer := NewMuxer(buf)
+	require.NoError(t, muxer.WriteHeader(streams))
+	require.NoError(t, muxer.WritePacket(av.Packet{Idx: 0, IsKeyFrame: true, Data: []byte{0xA0}}))
+	require.NoError(t, muxer.WriteTrailer())
+
+	// the metadata is the first tag, without duration and file size (not seekable)
+	tags := readTags(t, buf.Bytes())
+	require.Equal(t, uint8(flvio.TAG_SCRIPTDATA), tags[0].Type)
+	metadata := ParseMetadata(tags[0].Data)
+	require.NotNil(t, metadata)
+	require.Equal(t, float64(flvio.VIDEO_H264), metadata["videocodecid"])
+	require.Equal(t, 320.0, metadata["width"])
+	require.Equal(t, float64(flvio.SOUND_AAC), metadata["audiocodecid"])
+	require.Equal(t, flvio.AMFMap{"1": flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_AVC), "width": 320.0, "height": 240.0}}, metadata["videoTrackIdInfoMap"])
+	require.NotContains(t, metadata, "duration")
+	require.NotContains(t, metadata, "filesize")
+	require.Equal(t, uint8(flvio.TAG_VIDEO), tags[1].Type)
+}
+
+func TestMuxerMetadataSeekable(t *testing.T) {
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(decodeHex(t, avcRecord320x240))
+	require.NoError(t, err)
+
+	file, err := os.Create(t.TempDir() + "/test.flv")
+	require.NoError(t, err)
+	defer file.Close()
+	// the file doesn't start at the beginning of the writer
+	_, err = file.Write([]byte("prefix"))
+	require.NoError(t, err)
+
+	muxer := NewMuxer(file)
+	require.NoError(t, muxer.WriteHeader([]av.CodecData{h264}))
+	for i := 0; i < 10; i++ {
+		require.NoError(t, muxer.WritePacket(av.Packet{Idx: 0, IsKeyFrame: i == 0, Data: []byte{0xA0}, Time: int64(i) * 40}))
+	}
+	require.NoError(t, muxer.WriteTrailer())
+
+	b, err := os.ReadFile(file.Name())
+	require.NoError(t, err)
+	require.Equal(t, "prefix", string(b[:6]))
+	b = b[6:]
+	metadata := ParseMetadata(readTags(t, b)[0].Data)
+	require.Equal(t, 0.36, metadata["duration"])
+	require.Equal(t, float64(len(b)), metadata["filesize"])
+
+	// the file is read back
+	demuxer := NewDemuxer(bytes.NewReader(b))
+	streams, err := demuxer.Streams()
+	require.NoError(t, err)
+	require.Equal(t, []av.CodecData{h264}, streams)
+
+	// a writer that can't seek (e.g. a pipe) gets no duration and file size
+	buf := &bytes.Buffer{}
+	muxer = NewMuxer(failingSeeker{buf})
+	require.NoError(t, muxer.WriteHeader([]av.CodecData{h264}))
+	require.NoError(t, muxer.WriteTrailer())
+	metadata = ParseMetadata(readTags(t, buf.Bytes())[0].Data)
+	require.NotContains(t, metadata, "duration")
+}
+
+type failingSeeker struct {
+	io.Writer
+}
+
+func (failingSeeker) Seek(offset int64, whence int) (int64, error) {
+	return 0, errors.New("not seekable")
+}
+
+// writeFLV returns an FLV file with the file header flags and the tags.
+func writeFLV(t *testing.T, flags uint8, tags ...flvio.Tag) []byte {
+	buf := &bytes.Buffer{}
+	b := make([]byte, 256)
+	n := flvio.FillFileHeader(b, flags)
+	buf.Write(b[:n])
+	for _, tag := range tags {
+		require.NoError(t, flvio.WriteTag(buf, tag, 0, b))
+	}
+	return buf.Bytes()
+}
+
+func TestDemuxerMetadata(t *testing.T) {
+	record := decodeHex(t, avcRecord320x240)
+	h264, err := h264parser.NewCodecDataFromAVCDecoderConfRecord(record)
+	require.NoError(t, err)
+	seqhdr := flvio.Tag{Type: flvio.TAG_VIDEO, CodecID: flvio.VIDEO_H264, FrameType: flvio.FRAME_KEY, AVCPacketType: flvio.AVC_SEQHDR, Data: record}
+	frame := flvio.Tag{Type: flvio.TAG_VIDEO, CodecID: flvio.VIDEO_H264, FrameType: flvio.FRAME_KEY, AVCPacketType: flvio.AVC_NALU, Data: []byte{0xA0}}
+
+	// the file header has audio, but the metadata has an unsupported audio codec (ADPCM): probing doesn't wait
+	// for it
+	b := writeFLV(t, flvio.FILE_HAS_VIDEO|flvio.FILE_HAS_AUDIO,
+		MetadataToTag(flvio.AMFMap{"videocodecid": float64(flvio.VIDEO_H264), "audiocodecid": 1.0}),
+		seqhdr, frame,
+	)
+	streams, err := NewDemuxer(bytes.NewReader(b)).Streams()
+	require.NoError(t, err)
+	require.Equal(t, []av.CodecData{h264}, streams)
+
+	// the second video track is in the metadata: probing waits for its sequence start, which comes after the
+	// first frame
+	metadata, err := NewMetadataByStreams([]av.CodecData{h264, h264})
+	require.NoError(t, err)
+	b = writeFLV(t, flvio.FILE_HAS_VIDEO,
+		MetadataToTag(metadata),
+		seqhdr, frame,
+		TrackTag(seqhdr, 1), TrackTag(frame, 1),
+	)
+	demuxer := NewDemuxer(bytes.NewReader(b))
+	streams, err = demuxer.Streams()
+	require.NoError(t, err)
+	require.Equal(t, []av.CodecData{h264, h264}, streams)
+	for _, idx := range []int8{0, 1} {
+		pkt, err := demuxer.ReadPacket()
+		require.NoError(t, err)
+		require.Equal(t, idx, pkt.Idx)
+	}
+}
+
+func TestParseMetadata(t *testing.T) {
+	data := make([]byte, 256)
+	n := flvio.FillAMF0Val(data, "@setDataFrame")
+	n += flvio.FillAMF0Val(data[n:], "onMetaData")
+	n += flvio.FillAMF0Val(data[n:], flvio.AMFMap{"width": 640})
+	require.Equal(t, flvio.AMFMap{"width": 640.0}, ParseMetadata(data[:n]))
+
+	require.Nil(t, ParseMetadata(nil))
+	require.Nil(t, ParseMetadata([]byte{0xff, 0x00}))
+	n = flvio.FillAMF0Val(data, "onMetaData")
+	require.Nil(t, ParseMetadata(data[:n]))
+	n += flvio.FillAMF0Val(data[n:], "no map")
+	require.Nil(t, ParseMetadata(data[:n]))
 }
