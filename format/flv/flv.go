@@ -23,6 +23,7 @@ import (
 	"github.com/datarhei/joy4/codec/mp3parser"
 	"github.com/datarhei/joy4/codec/opusparser"
 	"github.com/datarhei/joy4/codec/screenvideoparser"
+	"github.com/datarhei/joy4/codec/vp6parser"
 	"github.com/datarhei/joy4/codec/vp9parser"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
@@ -73,6 +74,10 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 				info["videocodecid"] = flvio.VIDEO_SCREEN
 			case av.FLASHSV2:
 				info["videocodecid"] = flvio.VIDEO_SCREEN_V2
+			case av.VP6:
+				info["videocodecid"] = flvio.VIDEO_VP6
+			case av.VP6A:
+				info["videocodecid"] = flvio.VIDEO_VP6_ALPHA
 
 			default:
 				err = fmt.Errorf("flv: metadata: unsupported video codecType=%v", stream.Type())
@@ -535,6 +540,19 @@ func videoFrameCodecData(tag flvio.Tag) (av.CodecData, error) {
 			return nil, fmt.Errorf("flv: screen video: %w", err)
 		}
 		return stream, nil
+	case av.VP6, av.VP6A:
+		// the size adjustment precedes the frame, only a key frame has the size
+		if len(tag.Data) < 1 {
+			return nil, fmt.Errorf("flv: vp6: no size adjustment")
+		}
+		if tag.FrameType != flvio.FRAME_KEY {
+			return nil, nil
+		}
+		stream, err := vp6parser.NewCodecDataFromFrame(tagCodecType(tag), tag.Data[0], tag.Data[1:])
+		if err != nil {
+			return nil, fmt.Errorf("flv: vp6: %w", err)
+		}
+		return stream, nil
 	}
 	return nil, nil
 }
@@ -792,7 +810,7 @@ func isSupportedVideoCodecID(id interface{}) bool {
 	switch id := id.(type) {
 	case float64:
 		switch id {
-		case flvio.VIDEO_H264, flvio.VIDEO_H263, flvio.VIDEO_SCREEN, flvio.VIDEO_SCREEN_V2:
+		case flvio.VIDEO_H264, flvio.VIDEO_H263, flvio.VIDEO_SCREEN, flvio.VIDEO_SCREEN_V2, flvio.VIDEO_VP6, flvio.VIDEO_VP6_ALPHA:
 			return true
 		}
 		for _, fourcc := range supportedVideoFourCCs {
@@ -1002,6 +1020,10 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 				return av.FLASHSV
 			case flvio.VIDEO_SCREEN_V2:
 				return av.FLASHSV2
+			case flvio.VIDEO_VP6:
+				return av.VP6
+			case flvio.VIDEO_VP6_ALPHA:
+				return av.VP6A
 			}
 			return 0
 		}
@@ -1161,6 +1183,14 @@ func (prober *Prober) TagToPacket(tag flvio.Tag, timestamp int64) (pkt av.Packet
 			pkt.Data = tag.Data
 			pkt.CompositionTime = flvio.TsToTime(tag.CompositionTime)
 			pkt.IsKeyFrame = tag.FrameType == flvio.FRAME_KEY
+			if typ := tagCodecType(tag); typ == av.VP6 || typ == av.VP6A {
+				// the size adjustment is in the codec data
+				if len(tag.Data) < 1 {
+					ok = false
+					return
+				}
+				pkt.Data = tag.Data[1:]
+			}
 			if pkt.IsKeyFrame && track.videoParamSets != nil {
 				data := make([]byte, 0, len(track.videoParamSets)+len(tag.Data))
 				data = append(data, track.videoParamSets...)
@@ -1346,8 +1376,8 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 		ok = true
 		_tag = tag
 
-	case av.H263, av.FLASHSV, av.FLASHSV2:
-		// no sequence start, the config is in the header of each frame
+	case av.H263, av.FLASHSV, av.FLASHSV2, av.VP6, av.VP6A:
+		// no sequence start, the config is in the header of each (key) frame
 
 	case av.NELLYMOSER:
 	case av.SPEEX:
@@ -1563,6 +1593,26 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 			tag.FrameType = flvio.FRAME_KEY
 		}
 
+	case av.VP6, av.VP6A:
+		// the size adjustment precedes the frame
+		vp6 := stream.(vp6parser.CodecData)
+		data := make([]byte, 1+len(pkt.Data))
+		data[0] = vp6.Adjustment
+		copy(data[1:], pkt.Data)
+		tag = flvio.Tag{
+			Type:       flvio.TAG_VIDEO,
+			CodecID:    flvio.VIDEO_VP6,
+			PacketType: flvio.PKTTYPE_CODED_FRAMES,
+			FrameType:  flvio.FRAME_INTER,
+			Data:       data,
+		}
+		if stream.Type() == av.VP6A {
+			tag.CodecID = flvio.VIDEO_VP6_ALPHA
+		}
+		if pkt.IsKeyFrame {
+			tag.FrameType = flvio.FRAME_KEY
+		}
+
 	case av.AAC:
 		// see CodecDataToTag
 		tag = flvio.Tag{
@@ -1646,7 +1696,7 @@ func NewMuxer(w io.Writer) *Muxer {
 }
 
 // CodecTypes are the codecs that the muxer writes.
-var CodecTypes = []av.CodecType{av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.H263, av.FLASHSV, av.FLASHSV2, av.AAC, av.SPEEX, av.NELLYMOSER, av.OPUS, av.FLAC, av.AC3, av.EAC3, av.MP3}
+var CodecTypes = []av.CodecType{av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.H263, av.FLASHSV, av.FLASHSV2, av.VP6, av.VP6A, av.AAC, av.SPEEX, av.NELLYMOSER, av.OPUS, av.FLAC, av.AC3, av.EAC3, av.MP3}
 
 func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 	var flags uint8

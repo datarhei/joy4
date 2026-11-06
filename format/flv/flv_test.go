@@ -21,6 +21,7 @@ import (
 	"github.com/datarhei/joy4/codec/mp3parser"
 	"github.com/datarhei/joy4/codec/opusparser"
 	"github.com/datarhei/joy4/codec/screenvideoparser"
+	"github.com/datarhei/joy4/codec/vp6parser"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/stretchr/testify/require"
@@ -485,9 +486,10 @@ func TestProberPushMetadata(t *testing.T) {
 		{flvio.AMFMap{"audiocodecid": 4.0}, false, true},
 		{flvio.AMFMap{"audiocodecid": 5.0}, false, true},
 		{flvio.AMFMap{"audiocodecid": 6.0}, false, true},
-		// unsupported: JPEG, VP6, linear PCM, ADPCM, an unknown FourCC
+		// unsupported: JPEG, linear PCM, ADPCM, an unknown FourCC
 		{flvio.AMFMap{"videocodecid": 1.0, "audiocodecid": 3.0}, false, false},
-		{flvio.AMFMap{"videocodecid": 4.0, "audiocodecid": 1.0}, false, false},
+		{flvio.AMFMap{"videocodecid": 4.0, "audiocodecid": 1.0}, true, false},
+		{flvio.AMFMap{"videocodecid": 5.0}, true, false},
 		{flvio.AMFMap{"videocodecid": "VP62", "audiocodecid": 0.0}, false, false},
 		{flvio.AMFMap{"audiocodecid": "Opus"}, false, true},
 		{flvio.AMFMap{"audiocodecid": flvio.FourCCToFloat(flvio.FOURCC_OPUS)}, false, true},
@@ -2052,5 +2054,113 @@ func TestMuxDemuxScreenVideo(t *testing.T) {
 		require.Equal(t, int(tc.codecID), metadata["videocodecid"])
 		require.Equal(t, 640, metadata["width"])
 		require.Equal(t, 480, metadata["height"])
+	}
+}
+
+func vp6Tag(codecID uint8, frameType uint8, data []byte) flvio.Tag {
+	return flvio.Tag{Type: flvio.TAG_VIDEO, FrameType: frameType, CodecID: codecID, PacketType: flvio.PKTTYPE_CODED_FRAMES, Data: data}
+}
+
+func TestProberVP6(t *testing.T) {
+	// the size adjustment and the start of frames of FFmpeg's sample files: VP6 512x384, and VP6 with alpha
+	// 300x180 (19x12 macroblocks minus 4 and 12 pixels), with the offset of the alpha data
+	for _, tc := range []struct {
+		codecID uint8
+		typ     av.CodecType
+		key     string
+		inter   string
+		width   int
+		height  int
+	}{
+		{flvio.VIDEO_VP6, av.VP6, "00784618201820", "00ee41315fe2ff", 512, 384},
+		{flvio.VIDEO_VP6_ALPHA, av.VP6A, "4c0010f46a460c130c13", "4c0001f2e6589c", 300, 180},
+	} {
+		key, inter := decodeHex(t, tc.key), decodeHex(t, tc.inter)
+
+		prober := NewProber(0)
+		prober.PushMetadata(flvio.AMFMap{"videocodecid": float64(tc.codecID)})
+		require.True(t, prober.HasVideo, "%v", tc.typ)
+		// an inter frame has no size, the stream is created from the first key frame
+		require.NoError(t, prober.PushTag(vp6Tag(tc.codecID, flvio.FRAME_INTER, inter), 0))
+		require.False(t, prober.Probed(), "%v", tc.typ)
+		require.NoError(t, prober.PushTag(vp6Tag(tc.codecID, flvio.FRAME_KEY, key), 40))
+		require.True(t, prober.Probed(), "%v", tc.typ)
+		require.Len(t, prober.Streams, 1, "%v", tc.typ)
+		stream := prober.Streams[0].(vp6parser.CodecData)
+		require.Equal(t, tc.typ, stream.Type())
+		require.Equal(t, tc.width, stream.Width(), "%v", tc.typ)
+		require.Equal(t, tc.height, stream.Height(), "%v", tc.typ)
+		require.Equal(t, key[0], stream.Adjustment, "%v", tc.typ)
+
+		// the packets don't have the size adjustment, VP6 with alpha starts with the alpha offset
+		require.Equal(t, av.Packet{Data: inter[1:]}, prober.PopPacket(), "%v", tc.typ)
+		require.Equal(t, av.Packet{Data: key[1:], IsKeyFrame: true, Time: 40}, prober.PopPacket(), "%v", tc.typ)
+
+		// a frame without the size adjustment is dropped
+		_, ok := prober.TagToPacket(vp6Tag(tc.codecID, flvio.FRAME_INTER, nil), 80)
+		require.False(t, ok, "%v", tc.typ)
+	}
+
+	// an invalid key frame
+	prober := NewProber(0)
+	require.Error(t, prober.PushTag(vp6Tag(flvio.VIDEO_VP6, flvio.FRAME_KEY, []byte{0x00, 0x78}), 0))
+	prober = NewProber(0)
+	require.Error(t, prober.PushTag(vp6Tag(flvio.VIDEO_VP6, flvio.FRAME_KEY, nil), 0))
+}
+
+func TestMuxDemuxVP6(t *testing.T) {
+	for _, tc := range []struct {
+		codecID uint8
+		typ     av.CodecType
+		key     string
+		inter   string
+	}{
+		{flvio.VIDEO_VP6, av.VP6, "00784618201820", "00ee41315fe2ff"},
+		{flvio.VIDEO_VP6_ALPHA, av.VP6A, "af00002f78461d141d14", "af000020f84000"},
+	} {
+		key, inter := decodeHex(t, tc.key), decodeHex(t, tc.inter)
+		stream, err := vp6parser.NewCodecDataFromFrame(tc.typ, key[0], key[1:])
+		require.NoError(t, err)
+		packets := []av.Packet{
+			{IsKeyFrame: true, Data: key[1:]},
+			{Data: inter[1:], Time: 40},
+		}
+
+		buf := &bytes.Buffer{}
+		muxer := NewMuxer(buf)
+		require.NoError(t, muxer.WriteHeader([]av.CodecData{stream}))
+		for _, pkt := range packets {
+			require.NoError(t, muxer.WritePacket(pkt))
+		}
+		require.NoError(t, muxer.WriteTrailer())
+
+		// the tags have the size adjustment again
+		tags := []flvio.Tag{}
+		for _, tag := range readTags(t, buf.Bytes()) {
+			if tag.Type == flvio.TAG_VIDEO {
+				tags = append(tags, tag)
+			}
+		}
+		require.Len(t, tags, 2)
+		require.Equal(t, tc.codecID, tags[0].CodecID)
+		require.Equal(t, uint8(flvio.FRAME_KEY), tags[0].FrameType)
+		require.Equal(t, key, tags[0].Data)
+		require.Equal(t, uint8(flvio.FRAME_INTER), tags[1].FrameType)
+		require.Equal(t, inter, tags[1].Data)
+
+		demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+		got, err := demuxer.Streams()
+		require.NoError(t, err)
+		require.Equal(t, []av.CodecData{stream}, got)
+		for i, expected := range packets {
+			pkt, err := demuxer.ReadPacket()
+			require.NoError(t, err, "packet %d", i)
+			require.Equal(t, expected, pkt, "packet %d", i)
+		}
+
+		metadata, err := NewMetadataByStreams([]av.CodecData{stream})
+		require.NoError(t, err)
+		require.Equal(t, int(tc.codecID), metadata["videocodecid"])
+		require.Equal(t, stream.Width(), metadata["width"])
 	}
 }

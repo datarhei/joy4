@@ -63,6 +63,8 @@ const (
 
 	VIDEO_H263      = 2 // Sorenson H.263
 	VIDEO_SCREEN    = 3 // Screen video
+	VIDEO_VP6       = 4 // On2 VP6
+	VIDEO_VP6_ALPHA = 5 // On2 VP6 with alpha
 	VIDEO_SCREEN_V2 = 6 // Screen video v2
 	VIDEO_H264      = 7
 )
