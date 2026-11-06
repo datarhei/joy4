@@ -20,6 +20,7 @@ import (
 	"github.com/datarhei/joy4/codec/hevcparser"
 	"github.com/datarhei/joy4/codec/mp3parser"
 	"github.com/datarhei/joy4/codec/opusparser"
+	"github.com/datarhei/joy4/codec/screenvideoparser"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
 	"github.com/stretchr/testify/require"
@@ -478,6 +479,8 @@ func TestProberPushMetadata(t *testing.T) {
 		{flvio.AMFMap{"videocodecid": flvio.FourCCToFloat(flvio.FOURCC_VVC)}, true, false},
 		{flvio.AMFMap{"videocodecid": "hvc1"}, true, false},
 		{flvio.AMFMap{"videocodecid": 2.0}, true, false},
+		{flvio.AMFMap{"videocodecid": 3.0}, true, false},
+		{flvio.AMFMap{"videocodecid": 6.0}, true, false},
 		{flvio.AMFMap{"audiocodecid": 11.0}, false, true},
 		{flvio.AMFMap{"audiocodecid": 4.0}, false, true},
 		{flvio.AMFMap{"audiocodecid": 5.0}, false, true},
@@ -1971,4 +1974,83 @@ func TestMuxDemuxH263(t *testing.T) {
 	// H.263 can't be a track from 1 on (no FourCC)
 	_, err = TrackIDs([]av.CodecData{stream, stream})
 	require.Error(t, err)
+}
+
+func TestProberScreenVideo(t *testing.T) {
+	// the start of frames from FFmpeg's encoders (flashsv, flashsv2) at 320x240
+	for _, tc := range []struct {
+		codecID uint8
+		typ     av.CodecType
+	}{
+		{flvio.VIDEO_SCREEN, av.FLASHSV},
+		{flvio.VIDEO_SCREEN_V2, av.FLASHSV2},
+	} {
+		frame := decodeHex(t, "314030f001")
+		prober := NewProber(0)
+		prober.PushMetadata(flvio.AMFMap{"videocodecid": float64(tc.codecID)})
+		require.True(t, prober.HasVideo, "%v", tc.typ)
+		// the stream is created from the first frame, also an inter frame
+		require.NoError(t, prober.PushTag(flvio.Tag{Type: flvio.TAG_VIDEO, FrameType: flvio.FRAME_INTER, CodecID: tc.codecID, PacketType: flvio.PKTTYPE_CODED_FRAMES, Data: frame}, 0))
+		require.True(t, prober.Probed(), "%v", tc.typ)
+		require.Equal(t, []av.CodecData{screenvideoparser.CodecData{CodecType_: tc.typ, Width_: 320, Height_: 240}}, prober.Streams, "%v", tc.typ)
+		require.Equal(t, av.Packet{Data: frame}, prober.PopPacket(), "%v", tc.typ)
+
+		pkt, ok := prober.TagToPacket(flvio.Tag{Type: flvio.TAG_VIDEO, FrameType: flvio.FRAME_KEY, CodecID: tc.codecID, PacketType: flvio.PKTTYPE_CODED_FRAMES, Data: frame}, 40)
+		require.True(t, ok, "%v", tc.typ)
+		require.Equal(t, av.Packet{Data: frame, IsKeyFrame: true, Time: 40}, pkt, "%v", tc.typ)
+	}
+
+	// no image size
+	prober := NewProber(0)
+	require.Error(t, prober.PushTag(flvio.Tag{Type: flvio.TAG_VIDEO, FrameType: flvio.FRAME_KEY, CodecID: flvio.VIDEO_SCREEN, PacketType: flvio.PKTTYPE_CODED_FRAMES, Data: []byte{0x30, 0x00, 0x30, 0x00}}, 0))
+}
+
+func TestMuxDemuxScreenVideo(t *testing.T) {
+	for _, tc := range []struct {
+		codecID uint8
+		typ     av.CodecType
+	}{
+		{flvio.VIDEO_SCREEN, av.FLASHSV},
+		{flvio.VIDEO_SCREEN_V2, av.FLASHSV2},
+	} {
+		stream, err := screenvideoparser.NewCodecDataFromFrame(tc.typ, decodeHex(t, "328031e000"))
+		require.NoError(t, err)
+		packets := []av.Packet{
+			{IsKeyFrame: true, Data: decodeHex(t, "328031e000")},
+			{Data: decodeHex(t, "328031e001"), Time: 40},
+		}
+
+		buf := &bytes.Buffer{}
+		muxer := NewMuxer(buf)
+		require.NoError(t, muxer.WriteHeader([]av.CodecData{stream}))
+		for _, pkt := range packets {
+			require.NoError(t, muxer.WritePacket(pkt))
+		}
+		require.NoError(t, muxer.WriteTrailer())
+
+		frameTypes := []uint8{}
+		for _, tag := range readTags(t, buf.Bytes()) {
+			if tag.Type == flvio.TAG_VIDEO {
+				require.Equal(t, tc.codecID, tag.CodecID)
+				frameTypes = append(frameTypes, tag.FrameType)
+			}
+		}
+		require.Equal(t, []uint8{flvio.FRAME_KEY, flvio.FRAME_INTER}, frameTypes)
+
+		demuxer := NewDemuxer(bytes.NewReader(buf.Bytes()))
+		got, err := demuxer.Streams()
+		require.NoError(t, err)
+		require.Equal(t, []av.CodecData{stream}, got)
+		for i, expected := range packets {
+			pkt, err := demuxer.ReadPacket()
+			require.NoError(t, err, "packet %d", i)
+			require.Equal(t, expected, pkt, "packet %d", i)
+		}
+
+		metadata, err := NewMetadataByStreams([]av.CodecData{stream})
+		require.NoError(t, err)
+		require.Equal(t, int(tc.codecID), metadata["videocodecid"])
+		require.Equal(t, 640, metadata["width"])
+		require.Equal(t, 480, metadata["height"])
+	}
 }

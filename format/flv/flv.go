@@ -22,6 +22,7 @@ import (
 	"github.com/datarhei/joy4/codec/hevcparser"
 	"github.com/datarhei/joy4/codec/mp3parser"
 	"github.com/datarhei/joy4/codec/opusparser"
+	"github.com/datarhei/joy4/codec/screenvideoparser"
 	"github.com/datarhei/joy4/codec/vp9parser"
 	"github.com/datarhei/joy4/codec/vvcparser"
 	"github.com/datarhei/joy4/format/flv/flvio"
@@ -68,6 +69,10 @@ func NewMetadataByStreams(streams []av.CodecData) (metadata flvio.AMFMap, err er
 				info["videocodecid"] = flvio.FourCCToFloat(flvio.FOURCC_VVC)
 			case av.H263:
 				info["videocodecid"] = flvio.VIDEO_H263
+			case av.FLASHSV:
+				info["videocodecid"] = flvio.VIDEO_SCREEN
+			case av.FLASHSV2:
+				info["videocodecid"] = flvio.VIDEO_SCREEN_V2
 
 			default:
 				err = fmt.Errorf("flv: metadata: unsupported video codecType=%v", stream.Type())
@@ -524,6 +529,12 @@ func videoFrameCodecData(tag flvio.Tag) (av.CodecData, error) {
 			return nil, fmt.Errorf("flv: h263: %w", err)
 		}
 		return stream, nil
+	case av.FLASHSV, av.FLASHSV2:
+		stream, err := screenvideoparser.NewCodecDataFromFrame(tagCodecType(tag), tag.Data)
+		if err != nil {
+			return nil, fmt.Errorf("flv: screen video: %w", err)
+		}
+		return stream, nil
 	}
 	return nil, nil
 }
@@ -781,7 +792,7 @@ func isSupportedVideoCodecID(id interface{}) bool {
 	switch id := id.(type) {
 	case float64:
 		switch id {
-		case flvio.VIDEO_H264, flvio.VIDEO_H263:
+		case flvio.VIDEO_H264, flvio.VIDEO_H263, flvio.VIDEO_SCREEN, flvio.VIDEO_SCREEN_V2:
 			return true
 		}
 		for _, fourcc := range supportedVideoFourCCs {
@@ -987,6 +998,10 @@ func tagCodecType(tag flvio.Tag) av.CodecType {
 				return av.H264
 			case flvio.VIDEO_H263:
 				return av.H263
+			case flvio.VIDEO_SCREEN:
+				return av.FLASHSV
+			case flvio.VIDEO_SCREEN_V2:
+				return av.FLASHSV2
 			}
 			return 0
 		}
@@ -1331,8 +1346,8 @@ func CodecDataToTag(stream av.CodecData) (_tag flvio.Tag, ok bool, err error) {
 		ok = true
 		_tag = tag
 
-	case av.H263:
-		// no sequence start, the config is in the picture header of each frame
+	case av.H263, av.FLASHSV, av.FLASHSV2:
+		// no sequence start, the config is in the header of each frame
 
 	case av.NELLYMOSER:
 	case av.SPEEX:
@@ -1533,6 +1548,21 @@ func PacketToTag(pkt av.Packet, stream av.CodecData) (tag flvio.Tag, timestamp i
 			tag.FrameType = flvio.FRAME_DISPOSABLE
 		}
 
+	case av.FLASHSV, av.FLASHSV2:
+		tag = flvio.Tag{
+			Type:       flvio.TAG_VIDEO,
+			CodecID:    flvio.VIDEO_SCREEN,
+			PacketType: flvio.PKTTYPE_CODED_FRAMES,
+			FrameType:  flvio.FRAME_INTER,
+			Data:       pkt.Data,
+		}
+		if stream.Type() == av.FLASHSV2 {
+			tag.CodecID = flvio.VIDEO_SCREEN_V2
+		}
+		if pkt.IsKeyFrame {
+			tag.FrameType = flvio.FRAME_KEY
+		}
+
 	case av.AAC:
 		// see CodecDataToTag
 		tag = flvio.Tag{
@@ -1616,7 +1646,7 @@ func NewMuxer(w io.Writer) *Muxer {
 }
 
 // CodecTypes are the codecs that the muxer writes.
-var CodecTypes = []av.CodecType{av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.H263, av.AAC, av.SPEEX, av.NELLYMOSER, av.OPUS, av.FLAC, av.AC3, av.EAC3, av.MP3}
+var CodecTypes = []av.CodecType{av.H264, av.HEVC, av.VP9, av.AV1, av.VVC, av.H263, av.FLASHSV, av.FLASHSV2, av.AAC, av.SPEEX, av.NELLYMOSER, av.OPUS, av.FLAC, av.AC3, av.EAC3, av.MP3}
 
 func (muxer *Muxer) WriteHeader(streams []av.CodecData) (err error) {
 	var flags uint8
