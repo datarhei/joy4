@@ -105,6 +105,7 @@ func (self *WaitKeyFrame) ModifyPacket(pkt *av.Packet, streams []av.CodecData, v
 
 // Fix incorrect packet timestamps.
 type FixTime struct {
+	zeroSet       bool
 	zerobase      int64
 	incrbase      int64
 	lasttime      int64
@@ -114,8 +115,9 @@ type FixTime struct {
 
 func (self *FixTime) ModifyPacket(pkt *av.Packet, streams []av.CodecData, videoidx int, audioidx int) (drop bool, err error) {
 	if self.StartFromZero {
-		if self.zerobase == 0 {
+		if !self.zeroSet {
 			self.zerobase = pkt.Time
+			self.zeroSet = true
 		}
 		pkt.Time -= self.zerobase
 	}
